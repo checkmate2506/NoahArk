@@ -3,15 +3,8 @@
     "deny": [
       "Read(D:\\CRM\\**)",
       "Edit(D:\\CRM\\**)",
-      "Write(D:\\CRM\\**)",
-      "Glob(D:\\CRM\\**)",
-      "Grep(D:\\CRM\\**)",
-
       "Read(D:\\POS\\**)",
-      "Edit(D:\\POS\\**)",
-      "Write(D:\\POS\\**)",
-      "Glob(D:\\POS\\**)",
-      "Grep(D:\\POS\\**)"
+      "Edit(D:\\POS\\**)"
     ],
     "additionalDirectories": []
   }

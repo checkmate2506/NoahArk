@@ -228,37 +228,453 @@ Leave implementation work uncommitted for review.
 
 
 
+\## Geographic product scope
+
+
+
+NoahArk is a Southeast Asian business-management platform built specifically for:
+
+
+
+1\. Singapore
+
+2\. Malaysia
+
+3\. Indonesia
+
+
+
+These are the only supported countries in the approved product scope.
+
+
+
+NoahArk is not:
+
+
+
+\- A worldwide product
+
+\- A generic global ERP
+
+\- A country-neutral accounting system
+
+\- Intended to support every currency, tax authority or payroll jurisdiction
+
+\- Required to provide user-configurable statutory formulas for arbitrary countries
+
+
+
+Do not propose worldwide localisation, generic country plugins or support for
+
+countries outside Singapore, Malaysia and Indonesia.
+
+
+
+Future country expansion is out of scope unless separately approved.
+
+
+
+\## Legal-entity model
+
+
+
+A tenant represents a subscribing customer or corporate group.
+
+
+
+A tenant may contain one or more legal entities.
+
+
+
+Every legal entity must have exactly one operating jurisdiction:
+
+
+
+\- SG — Singapore
+
+\- MY — Malaysia
+
+\- ID — Indonesia
+
+
+
+The legal entity's jurisdiction determines:
+
+
+
+\- Registered identifiers
+
+\- Functional currency
+
+\- Accounting defaults
+
+\- Tax configuration
+
+\- Statutory invoice requirements
+
+\- E-invoicing integration
+
+\- Payroll rules
+
+\- Employment contribution rules
+
+\- Public holidays
+
+\- Address structure
+
+\- Document numbering
+
+\- Statutory reports
+
+\- Data-retention requirements
+
+\- Default language
+
+\- Default time zone
+
+
+
+Country-sensitive transactions must belong to a legal entity. They must not rely
+
+only on a tenant-level country setting.
+
+
+
+A corporate group may contain, for example:
+
+
+
+\- One Singapore company
+
+\- One Malaysian company
+
+\- One Indonesian company
+
+
+
+These companies may share a tenant and authorised users, but their accounting
+
+ledgers, tax registrations, payrolls, statutory submissions, document sequences
+
+and base currencies must remain legally separated.
+
+
+
+\## Supported country profiles
+
+
+
+\### Singapore
+
+
+
+Baseline support must consider:
+
+
+
+\- Currency: SGD
+
+\- Time zone: Asia/Singapore
+
+\- Business identifier: UEN
+
+\- GST registration and GST accounting
+
+\- IRAS reporting requirements
+
+\- InvoiceNow and Peppol readiness
+
+\- CPF employer and employee contributions
+
+\- Skills Development Levy
+
+\- Foreign Worker Levy where applicable
+
+\- Self-Help Group contributions where applicable
+
+\- Payroll and payslip requirements
+
+\- IR8A and applicable employment-income reporting
+
+\- Singapore public holidays
+
+\- Singapore address formats
+
+\- PDPA-aligned handling of personal information
+
+
+
+\### Malaysia
+
+
+
+Baseline support must consider:
+
+
+
+\- Currency: MYR
+
+\- Time zone: Asia/Kuala\_Lumpur
+
+\- Business registration identifiers
+
+\- Tax Identification Number
+
+\- SST configuration and reporting
+
+\- LHDN/HASiL MyInvois e-Invoice integration
+
+\- Invoice, credit-note, debit-note and refund-note requirements
+
+\- EPF/KWSP
+
+\- SOCSO/PERKESO
+
+\- Employment Insurance System
+
+\- PCB/MTD payroll deductions
+
+\- HRD Corp levy where applicable
+
+\- Malaysian payroll and payslip requirements
+
+\- Federal and state public holidays
+
+\- Malaysian address and state codes
+
+\- PDPA-aligned handling of personal information
+
+
+
+\### Indonesia
+
+
+
+Baseline support must consider:
+
+
+
+\- Currency: IDR
+
+\- Time zones:
+
+&#x20; - Asia/Jakarta
+
+&#x20; - Asia/Makassar
+
+&#x20; - Asia/Jayapura
+
+\- Business and taxpayer identifiers, including applicable NPWP/NIK information
+
+\- PPN/VAT
+
+\- Applicable withholding-tax categories
+
+\- PPh 21 payroll withholding
+
+\- DJP Coretax and applicable electronic tax-invoice requirements
+
+\- BPJS Kesehatan
+
+\- BPJS Ketenagakerjaan
+
+\- THR requirements
+
+\- Indonesian payroll and payslip requirements
+
+\- Indonesian public and collective holidays
+
+\- Indonesian address hierarchy
+
+\- Personal-data protection requirements
+
+
+
+\## Supported languages
+
+
+
+The initial application-language scope is:
+
+
+
+\- English
+
+\- Bahasa Melayu
+
+\- Bahasa Indonesia
+
+
+
+English may be the initial development and administration language.
+
+
+
+Do not add arbitrary worldwide languages during the foundation phases.
+
+
+
+The architecture must distinguish:
+
+
+
+\- User-interface language
+
+\- Customer-facing document language
+
+\- Employee communication language
+
+\- Legal-entity jurisdiction
+
+\- Transaction currency
+
+
+
+Changing a display language must not change accounting or statutory behaviour.
+
+
+
+\## Currency scope
+
+
+
+Primary functional currencies are:
+
+
+
+\- SGD
+
+\- MYR
+
+\- IDR
+
+
+
+The accounting architecture must support:
+
+
+
+\- One functional currency per legal entity
+
+\- Transactions in SGD, MYR and IDR
+
+\- Exchange rates
+
+\- Foreign-currency gains and losses
+
+\- Country-appropriate decimal and display behaviour
+
+\- Exchange-rate source and effective date
+
+\- Locked rates on posted transactions
+
+\- Consolidated group reporting with explicit translation rules
+
+
+
+Do not design an unrestricted worldwide currency catalogue during the initial
+
+implementation.
+
+
+
+\## Regulatory implementation rule
+
+
+
+Statutory rates, thresholds, contribution tables, tax codes, submission schemas
+
+and effective dates must never be permanently hard-coded into business logic.
+
+
+
+They must be:
+
+
+
+\- Versioned
+
+\- Effective-dated
+
+\- Jurisdiction-specific
+
+\- Tested against official examples
+
+\- Traceable to an authoritative government source
+
+\- Capable of supporting corrections and retrospective payroll calculations
+
+\- Protected against unauthorised modification
+
+
+
+However, this requirement must not become a generic worldwide rule engine.
+
+Configuration is restricted to Singapore, Malaysia and Indonesia.
+
+
+
+Claude must not invent statutory formulas.
+
+
+
+Before implementing a statutory calculation or submission integration, Claude
+
+must identify the currently applicable official specification and record:
+
+
+
+\- Issuing authority
+
+\- Source URL
+
+\- Publication or specification version
+
+\- Effective date
+
+\- Implementation assumptions
+
+\- Test examples
+
+\- Known future changes
+
+
+
 \## Product architecture principles
 
 
 
-\- Greenfield modular-monolith architecture.
+\- Greenfield modular-monolith architecture
 
-\- TypeScript strict mode.
+\- TypeScript strict mode
 
-\- PostgreSQL as the authoritative transactional database.
+\- PostgreSQL as the authoritative transactional database
 
-\- Multi-tenant isolation from the first migration.
+\- Multi-tenant and multi-legal-entity support from the first migration
 
-\- Server-side RBAC and field-level controls.
+\- Strict legal-entity separation for accounting, tax and payroll
 
-\- Immutable audit events for sensitive operations.
+\- Server-side RBAC and field-level controls
 
-\- Database transactions for multi-record business operations.
+\- Immutable audit events for sensitive operations
 
-\- Idempotency for retryable financial and workflow operations.
+\- Database transactions for multi-record operations
 
-\- Database constraints for critical invariants.
+\- Idempotency for financial and statutory submissions
 
-\- Double-entry accounting.
+\- Database constraints for critical invariants
 
-\- Posted financial records corrected through reversal, not destructive editing.
+\- Double-entry accounting
 
-\- Sensitive HR and payroll information protected separately.
+\- Posted financial records corrected through controlled reversals
 
-\- Automated unit, integration, security and tenant-isolation tests.
+\- Sensitive HR and payroll information protected separately
 
-\- Singapore localisation supported without hard-coding the platform to one country.
+\- Automated unit, integration, security and tenant-isolation tests
 
-\- No module is complete merely because screens and CRUD APIs exist.
+\- Deep compatibility with Singapore, Malaysia and Indonesia
+
+\- No worldwide or arbitrary-country scope
+
+\- No module considered complete merely because screens and CRUD APIs exist
 
