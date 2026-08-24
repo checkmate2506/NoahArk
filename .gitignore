@@ -1,0 +1,44 @@
+# dependencies
+node_modules/
+.pnpm-store/
+
+# build outputs
+.next/
+dist/
+build/
+*.tsbuildinfo
+.turbo/
+
+# env
+.env
+.env.local
+.env.*.local
+
+# prisma — F-26 (Phase 1B): corrected path. The generator's `output` in
+# schema.prisma is `../src/generated/prisma`, not `prisma/generated` — the
+# old path here never matched anything, so the generated client was never
+# actually excluded.
+packages/db/src/generated/
+
+# test artifacts
+coverage/
+playwright-report/
+test-results/
+.embedded-postgres/
+
+# local file storage (F-27) — LocalStorageProvider's dev/test upload root
+# (FILES_LOCAL_ROOT, defaults to ./.data/files) must never be committed.
+.data/
+
+# logs
+*.log
+npm-debug.log*
+
+# os
+.DS_Store
+Thumbs.db
+
+# editor
+.vscode/*
+!.vscode/extensions.json
+.idea/

@@ -1,0 +1,73 @@
+@import "tailwindcss";
+
+/*
+ * NoahArk design tokens — independently designed (CLAUDE.md: no PMSuite
+ * branding, palette or visual design copied). A deep teal/slate identity,
+ * distinct from typical blue-heavy SaaS admin defaults.
+ */
+@theme {
+  --color-background: oklch(99% 0.002 240);
+  --color-foreground: oklch(20% 0.02 240);
+
+  --color-card: oklch(100% 0 0);
+  --color-card-foreground: oklch(20% 0.02 240);
+
+  --color-primary: oklch(45% 0.1 195);
+  --color-primary-foreground: oklch(98% 0.005 195);
+
+  --color-secondary: oklch(94% 0.01 240);
+  --color-secondary-foreground: oklch(25% 0.02 240);
+
+  --color-muted: oklch(95% 0.005 240);
+  --color-muted-foreground: oklch(48% 0.01 240);
+
+  --color-accent: oklch(93% 0.03 195);
+  --color-accent-foreground: oklch(25% 0.05 195);
+
+  --color-destructive: oklch(55% 0.2 25);
+  --color-destructive-foreground: oklch(98% 0.005 25);
+
+  --color-success: oklch(55% 0.14 155);
+  --color-warning: oklch(65% 0.15 80);
+
+  --color-border: oklch(90% 0.005 240);
+  --color-input: oklch(88% 0.005 240);
+  --color-ring: oklch(45% 0.1 195);
+}
+
+@media (prefers-color-scheme: dark) {
+  @theme {
+    --color-background: oklch(18% 0.015 240);
+    --color-foreground: oklch(95% 0.005 240);
+
+    --color-card: oklch(22% 0.015 240);
+    --color-card-foreground: oklch(95% 0.005 240);
+
+    --color-primary: oklch(70% 0.11 195);
+    --color-primary-foreground: oklch(15% 0.02 195);
+
+    --color-secondary: oklch(28% 0.015 240);
+    --color-secondary-foreground: oklch(92% 0.005 240);
+
+    --color-muted: oklch(26% 0.012 240);
+    --color-muted-foreground: oklch(65% 0.01 240);
+
+    --color-accent: oklch(30% 0.03 195);
+    --color-accent-foreground: oklch(90% 0.02 195);
+
+    --color-destructive: oklch(62% 0.19 25);
+    --color-destructive-foreground: oklch(97% 0.005 25);
+
+    --color-success: oklch(68% 0.14 155);
+    --color-warning: oklch(75% 0.14 80);
+
+    --color-border: oklch(32% 0.012 240);
+    --color-input: oklch(35% 0.012 240);
+    --color-ring: oklch(70% 0.11 195);
+  }
+}
+
+body {
+  background: var(--color-background);
+  color: var(--color-foreground);
+}

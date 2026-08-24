@@ -1,0 +1,23 @@
+{
+  "name": "@noahark/files",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint ."
+  },
+  "dependencies": {
+    "@noahark/authz": "workspace:*",
+    "@noahark/core": "workspace:*",
+    "@noahark/db": "workspace:*",
+    "file-type": "22.0.2"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3",
+    "vitest": "4.1.10"
+  }
+}

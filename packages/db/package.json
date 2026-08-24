@@ -1,0 +1,46 @@
+{
+  "name": "@noahark/db",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./worker": "./src/workerClient.ts",
+    "./system": "./src/systemClient.ts"
+  },
+  "scripts": {
+    "db:generate": "prisma generate",
+    "db:validate": "prisma validate",
+    "db:format": "prisma format",
+    "db:provision": "node provisioning/provision-roles.mjs",
+    "db:migrate": "prisma migrate dev",
+    "db:migrate:deploy": "prisma migrate deploy",
+    "db:migrate:diff": "prisma migrate diff --from-empty --to-schema prisma/schema.prisma --script",
+    "db:seed": "tsx prisma/seed.ts",
+    "db:audit:verify": "tsx scripts/verify-audit-chain.ts",
+    "db:dev-postgres:start": "node scripts/embedded-pg.mjs start",
+    "db:dev-postgres:stop": "node scripts/embedded-pg.mjs stop",
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint ."
+  },
+  "dependencies": {
+    "@noahark/audit": "workspace:*",
+    "@noahark/auth": "workspace:*",
+    "@noahark/authz": "workspace:*",
+    "@prisma/adapter-pg": "7.9.1",
+    "@prisma/client": "7.9.1",
+    "dotenv": "17.4.2",
+    "pg": "8.23.0"
+  },
+  "devDependencies": {
+    "@types/pg": "8.21.0",
+    "embedded-postgres": "18.4.0-beta.17",
+    "prisma": "7.9.1",
+    "tsx": "4.23.12",
+    "typescript": "5.9.3",
+    "vitest": "4.1.10"
+  }
+}

@@ -1,0 +1,12 @@
+packages:
+  - "apps/*"
+  - "packages/*"
+
+allowBuilds:
+  "@embedded-postgres/windows-x64": true
+  "@prisma/engines": true
+  esbuild: true
+  prisma: true
+
+shamefullyHoist: false
+strictPeerDependencies: false

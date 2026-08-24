@@ -1,0 +1,1913 @@
+openapi: 3.1.0
+info:
+  title: NoahArk API
+  version: "1"
+  description: >
+    Phase 1 foundation surface. Business-module endpoints (CRM, accounting,
+    payroll, tax, invoicing, purchasing, projects) do not exist yet — see
+    docs/IMPLEMENTATION_ROADMAP.md.
+
+
+    **Authentication**: an opaque, HttpOnly, database-backed session cookie
+    (`noahark_session`). Tenant/legal-entity identity is never accepted from
+    the client — every request re-derives it server-side from the session
+    plus the caller's real memberships. A handful of routes are public
+    (no session required) because a different artifact — a short-lived
+    signed token or HMAC signature — is itself the authorization proof; each
+    such operation below is marked `x-noahark-auth: public` and has an empty
+    `security: []`.
+
+
+    **CSRF**: NOT a token scheme. `apiHandler` (the wrapper every route in
+    this spec goes through) validates the `Origin` header against a trusted-
+    origin allowlist (`AUTH_URL` + `TRUSTED_ORIGINS`) for every state-changing
+    method (POST/PUT/PATCH/DELETE) automatically — GET/HEAD are exempt. This
+    is enforced identically for every operation below that isn't a GET; the
+    `x-noahark-csrf: true` vendor field on each operation is a machine-
+    checkable restatement of that fact, not a per-route opt-in.
+
+
+    **Authorization**: most operations require a specific permission (listed
+    per-operation as `x-noahark-permission`), checked via `authorize()` —
+    which ALSO verifies the caller has access to the relevant legal entity
+    when the operation is entity-scoped, and throws a generic `FORBIDDEN`
+    that never distinguishes "not found" from "not permitted". A `null`
+    `x-noahark-permission` means the operation is self-service (gated only by
+    a valid session) or scoped implicitly to the caller's own records.
+
+
+    **Errors**: every non-2xx response uses the `ErrorEnvelope` schema.
+    `error.code` is always one of `AppErrorCode` (never a raw driver/stack
+    message) and `error.requestId` always matches the `x-request-id`
+    response header, for correlating a client-reported error with server
+    logs.
+servers:
+  - url: /api/v1
+security:
+  - sessionCookie: []
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: noahark_session
+      description: >
+        Opaque, HttpOnly, database-backed session token. Never a JWT.
+        Tenant/legal-entity identity is never accepted from the client —
+        every request re-derives it from this session server-side.
+  schemas:
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, requestId]
+          properties:
+            code:
+              type: string
+              description: Stable, client-safe error code — see AppErrorCode (packages/core/src/errors.ts).
+              enum:
+                - UNAUTHENTICATED
+                - FORBIDDEN
+                - NOT_FOUND
+                - VALIDATION_FAILED
+                - CONFLICT
+                - STALE_VERSION
+                - RATE_LIMITED
+                - IDEMPOTENCY_MISMATCH
+                - MODULE_DISABLED
+                - INTERNAL_ERROR
+            message:
+              type: string
+            details:
+              type: object
+              description: Present only for some codes (e.g. VALIDATION_FAILED's zod issues, MODULE_DISABLED's moduleKey). Never a stack trace or driver error.
+            requestId:
+              type: string
+              format: uuid
+    Tenant:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        slug: { type: string }
+        status: { type: string, enum: [ACTIVE, SUSPENDED] }
+    TenantSummary:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        slug: { type: string }
+    LegalEntity:
+      type: object
+      properties:
+        id: { type: string }
+        tenantId: { type: string }
+        name: { type: string }
+        jurisdiction: { type: string, enum: [SG, MY, ID] }
+        functionalCurrency: { type: string, enum: [SGD, MYR, IDR] }
+        timeZone: { type: string }
+        defaultLanguage: { type: string, enum: [EN, MS, ID] }
+        registeredIdentifier: { type: [string, "null"] }
+        status: { type: string, enum: [ACTIVE, INACTIVE] }
+    TenantMembership:
+      type: object
+      properties:
+        id: { type: string }
+        tenantId: { type: string }
+        userId: { type: string }
+        status: { type: string, enum: [ACTIVE, SUSPENDED] }
+        user:
+          type: object
+          properties:
+            id: { type: string }
+            email: { type: string }
+            name: { type: [string, "null"] }
+            isDisabled: { type: boolean }
+    Permission:
+      type: object
+      properties:
+        id: { type: string }
+        key: { type: string }
+        category: { type: string }
+        description: { type: string }
+    Role:
+      type: object
+      properties:
+        id: { type: string }
+        tenantId: { type: string }
+        key: { type: string }
+        name: { type: string }
+        description: { type: [string, "null"] }
+        isSystem: { type: boolean }
+        rolePermissions:
+          type: array
+          items:
+            type: object
+            properties:
+              permission: { $ref: "#/components/schemas/Permission" }
+    MembershipRole:
+      type: object
+      properties:
+        id: { type: string }
+        tenantId: { type: string }
+        tenantMembershipId: { type: string }
+        roleId: { type: string }
+        legalEntityId: { type: [string, "null"] }
+        assignedByUserId: { type: string }
+    MembershipInvitation:
+      type: object
+      properties:
+        id: { type: string }
+        tenantId: { type: string }
+        email: { type: string }
+        status: { type: string, enum: [PENDING, ACCEPTED, REVOKED, EXPIRED] }
+        intendedRoleId: { type: [string, "null"] }
+        intendedLegalEntityId: { type: [string, "null"] }
+        expiresAt: { type: string, format: date-time }
+        revokedAt: { type: [string, "null"], format: date-time }
+    LegalEntityMembership:
+      type: object
+      properties:
+        id: { type: string }
+        tenantId: { type: string }
+        legalEntityId: { type: string }
+        userId: { type: string }
+        status: { type: string, enum: [ACTIVE, SUSPENDED] }
+        user:
+          type: object
+          properties:
+            id: { type: string }
+            email: { type: string }
+            name: { type: [string, "null"] }
+    TenantSetting:
+      type: object
+      properties:
+        id: { type: string }
+        tenantId: { type: string }
+        key: { type: string }
+        value: {}
+    LegalEntitySetting:
+      type: object
+      properties:
+        id: { type: string }
+        tenantId: { type: string }
+        legalEntityId: { type: string }
+        key: { type: string }
+        value: {}
+    AuditEvent:
+      type: object
+      properties:
+        id: { type: string }
+        tenantId: { type: [string, "null"] }
+        legalEntityId: { type: [string, "null"] }
+        actorUserId: { type: [string, "null"] }
+        actorType: { type: string, enum: [USER, SYSTEM] }
+        action: { type: string }
+        entityType: { type: string }
+        entityId: { type: [string, "null"] }
+        outcome: { type: string, enum: [SUCCESS, FAILURE, DENIED] }
+        sequence:
+          type: string
+          description: BigInt serialized as a decimal string — the chain's monotonic, gapless position (never createdAt — see AuditPage's nextCursor).
+        hash: { type: string }
+        prevHash: { type: [string, "null"] }
+        createdAt: { type: string, format: date-time }
+    AuditEventPage:
+      type: object
+      properties:
+        events:
+          type: array
+          items: { $ref: "#/components/schemas/AuditEvent" }
+        nextCursor:
+          type: [string, "null"]
+          description: >
+            Opaque (base64url of the last event's decimal `sequence`).
+            Pass back verbatim as `?cursor=` to fetch the next page. `null`
+            means no further pages. A malformed cursor is rejected with
+            VALIDATION_FAILED, never a crash.
+    ApprovalStep:
+      type: object
+      properties:
+        id: { type: string }
+        stepOrder: { type: integer }
+        approverRoleId: { type: string }
+        name: { type: [string, "null"] }
+    ApprovalPolicy:
+      type: object
+      properties:
+        id: { type: string }
+        subjectType: { type: string }
+        name: { type: string }
+        isActive: { type: boolean }
+        allowSelfApproval: { type: boolean }
+        steps:
+          type: array
+          items: { $ref: "#/components/schemas/ApprovalStep" }
+    ApprovalDecision:
+      type: object
+      properties:
+        id: { type: string }
+        approvalRequestId: { type: string }
+        stepOrder: { type: integer }
+        decidedByUserId: { type: string }
+        action: { type: string, enum: [APPROVE, REJECT, CANCEL] }
+        comment: { type: [string, "null"] }
+        createdAt: { type: string, format: date-time }
+    ApprovalRequest:
+      type: object
+      properties:
+        id: { type: string }
+        tenantId: { type: string }
+        legalEntityId: { type: [string, "null"] }
+        subjectType: { type: string }
+        subjectId: { type: string }
+        status: { type: string, enum: [PENDING, APPROVED, REJECTED, CANCELLED] }
+        currentStepOrder: { type: integer }
+        version:
+          type: integer
+          description: Optimistic-concurrency token — pass back as expectedVersion on /decide.
+        submittedByUserId: { type: string }
+        approvalPolicy: { $ref: "#/components/schemas/ApprovalPolicy" }
+        decisions:
+          type: array
+          items: { $ref: "#/components/schemas/ApprovalDecision" }
+    Notification:
+      type: object
+      properties:
+        id: { type: string }
+        tenantId: { type: string }
+        legalEntityId: { type: [string, "null"] }
+        channel: { type: string, enum: [IN_APP, EMAIL] }
+        type: { type: string }
+        title: { type: string }
+        body: { type: string }
+        readAt: { type: [string, "null"], format: date-time }
+        createdAt: { type: string, format: date-time }
+    FileObject:
+      type: object
+      properties:
+        id: { type: string }
+        tenantId: { type: string }
+        legalEntityId: { type: [string, "null"] }
+        originalFilename: { type: string }
+        mimeType: { type: string }
+        sizeBytes: { type: integer }
+        sha256: { type: string }
+        status: { type: string, enum: [ACTIVE, QUARANTINED, DELETED] }
+        version:
+          type: integer
+          description: Bumped on delete/quarantine/revoke/content-replacement — every previously-issued signed URL for a lower version is instantly rejected.
+        revokedAt: { type: [string, "null"], format: date-time }
+        uploadedByUserId: { type: string }
+        createdAt: { type: string, format: date-time }
+  parameters:
+    tenantId:
+      name: tenantId
+      in: path
+      required: true
+      schema: { type: string }
+    legalEntityId:
+      name: legalEntityId
+      in: path
+      required: true
+      schema: { type: string }
+    roleId:
+      name: roleId
+      in: path
+      required: true
+      schema: { type: string }
+    invitationId:
+      name: invitationId
+      in: path
+      required: true
+      schema: { type: string }
+    membershipId:
+      name: membershipId
+      in: path
+      required: true
+      schema: { type: string }
+    assignmentId:
+      name: assignmentId
+      in: path
+      required: true
+      schema: { type: string }
+    notificationId:
+      name: notificationId
+      in: path
+      required: true
+      schema: { type: string }
+    fileId:
+      name: fileId
+      in: path
+      required: true
+      schema: { type: string }
+    grantUserId:
+      name: userId
+      in: path
+      required: true
+      schema: { type: string }
+    approvalRequestId:
+      name: requestId
+      in: path
+      required: true
+      schema: { type: string }
+    cursor:
+      name: cursor
+      in: query
+      required: false
+      schema: { type: string }
+    limit:
+      name: limit
+      in: query
+      required: false
+      schema: { type: integer, minimum: 1, maximum: 100, default: 25 }
+  responses:
+    Unauthorized:
+      description: No valid session (UNAUTHENTICATED)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    Forbidden:
+      description: Session valid, but the authorization gate denied the action (FORBIDDEN) — never distinguishes not-found from not-permitted
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    NotFound:
+      description: Resource does not exist, or exists in a tenant/legal entity the caller cannot see (NOT_FOUND)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    ValidationFailed:
+      description: Malformed request body/query (VALIDATION_FAILED)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    Conflict:
+      description: A business-rule/state conflict (CONFLICT) — e.g. duplicate key, invalid state transition, self-action blocked
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    StaleVersion:
+      description: Optimistic-concurrency mismatch — the resource was modified since expectedVersion was read (STALE_VERSION)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    ModuleDisabled:
+      description: The tenant has explicitly disabled the module this operation belongs to (MODULE_DISABLED)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+paths:
+  /me/tenants:
+    get:
+      operationId: listMyTenants
+      summary: List tenants the current user has active membership in
+      x-noahark-auth: session
+      x-noahark-csrf: false
+      x-noahark-permission: null
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      tenants:
+                        type: array
+                        items: { $ref: "#/components/schemas/TenantSummary" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /auth/sign-in:
+    post:
+      operationId: signIn
+      summary: Sign in with email + password (or begin an MFA challenge)
+      x-noahark-auth: public
+      x-noahark-csrf: true
+      x-noahark-permission: null
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string }
+      responses:
+        "200":
+          description: >
+            Either signed in (sets the noahark_session cookie, body
+            `{ data: { user: { id, email, name } } }`) or an MFA challenge
+            was issued (`{ data: { mfaRequired: true, challengeToken } }`,
+            no cookie yet — exchange the token at /auth/mfa/challenge).
+        "401":
+          description: Invalid email or password (UNAUTHENTICATED) — deliberately identical message/timing for unknown-email and wrong-password, to prevent account-enumeration.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "429":
+          description: >
+            RATE_LIMITED — Postgres-backed, dual-dimension (10 failed
+            attempts / 15 min per email, 20 / 15 min per trusted-proxy-
+            extracted IP). Fails OPEN on limiter infrastructure errors — a
+            limiter outage never becomes a global sign-in outage. Also
+            returned (N-1, Phase 1D) when the password is correct and the
+            account has MFA enabled but its MFA-attempt budget (a
+            SEPARATE, per-account Postgres-backed counter — see POST
+            /auth/mfa/challenge) is already exhausted — no new challenge
+            token is issued in that case.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+  /auth/sign-out:
+    post:
+      operationId: signOut
+      summary: Sign out (invalidates the session server-side; always clears the cookie)
+      x-noahark-auth: optional
+      x-noahark-csrf: true
+      x-noahark-permission: null
+      security: []
+      description: Idempotent — calling this with no/an already-invalid session cookie still succeeds.
+      responses:
+        "200":
+          description: "{ data: { signedOut: true } }"
+
+  /auth/verify-email/request:
+    post:
+      operationId: requestEmailVerification
+      summary: Request (or resend) an email-verification link for the current user
+      x-noahark-auth: session
+      x-noahark-csrf: true
+      x-noahark-permission: null
+      description: >
+        Always returns the same response whether or not the account was
+        already verified (no verification-status oracle). Resending
+        invalidates any still-pending prior token. Delivered via the
+        console email provider in Phase 1 (no production provider — AD-3).
+      responses:
+        "200":
+          description: "{ data: { requested: true } }"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /auth/verify-email/confirm:
+    post:
+      operationId: confirmEmailVerification
+      summary: Confirm an email-verification token
+      x-noahark-auth: public
+      x-noahark-csrf: true
+      x-noahark-permission: null
+      security: []
+      description: The token itself is the authorization artifact — single-use, 24h TTL, SHA-256-hashed at rest.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: { type: string }
+      responses:
+        "200":
+          description: "{ data: { verified: true } }"
+        "422":
+          description: Invalid or expired verification link (VALIDATION_FAILED) — one generic message covers missing/expired/already-used/lost-race, deliberately no oracle.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+  /auth/mfa/enroll:
+    post:
+      operationId: enrollMfa
+      summary: Begin TOTP MFA enrolment for the current user
+      x-noahark-auth: session
+      x-noahark-csrf: true
+      x-noahark-permission: null
+      description: Two-step enrolment (enroll → confirm) — an unconfirmed secret never gates sign-in. Secret is AES-256-GCM encrypted at rest.
+      responses:
+        "200":
+          description: "{ data: { provisioningUri: string, secret: string } } — secret shown once for manual entry."
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          description: MFA is already enabled — disable it before re-enrolling (VALIDATION_FAILED)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+  /auth/mfa/confirm:
+    post:
+      operationId: confirmMfaEnrollment
+      summary: Confirm a pending MFA enrolment with a TOTP code
+      x-noahark-auth: session
+      x-noahark-csrf: true
+      x-noahark-permission: null
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code: { type: string, minLength: 6, maxLength: 6 }
+      responses:
+        "200":
+          description: "{ data: { recoveryCodes: string[] } } — 10 single-use recovery codes, shown once."
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+
+  /auth/mfa/challenge:
+    post:
+      operationId: verifyMfaChallenge
+      summary: Complete sign-in by verifying a TOTP or recovery code against a challenge token
+      x-noahark-auth: public
+      x-noahark-csrf: true
+      x-noahark-permission: null
+      security: []
+      description: >
+        The challengeToken (issued only after a correct password check
+        during sign-in) is the authorization artifact — TTL 5 min, SHA-256-
+        hashed, single-use (consumed on lookup regardless of outcome, so a
+        failed attempt gets no unlimited retries against one password
+        proof). Recovery-code consumption is an atomic conditional UPDATE
+        (F-22, Phase 1B.1) — two concurrent challenges racing the same
+        recovery code can never both succeed. A submitted TOTP code is
+        additionally rejected if its RFC 4226 HOTP counter was already
+        accepted before (N-1, Phase 1D — replay protection; an atomic
+        conditional UPDATE on the same principle as the recovery-code
+        consumption). Rate-limited on two independent, Postgres-backed
+        dimensions (N-1, Phase 1D) — per-account (keyed by the resolved
+        userId, so a freshly re-issued challenge token after re-submitting
+        the correct password does NOT reset this counter) and per
+        trusted-proxy-extracted source IP — checked before password
+        verification even issues a new token (see POST /auth/sign-in) and
+        again here before a submitted code is checked.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [challengeToken, code]
+              properties:
+                challengeToken: { type: string }
+                code:
+                  {
+                    type: string,
+                    description: A 6-digit TOTP code or a single-use recovery code.,
+                  }
+      responses:
+        "200":
+          description: 'Signed in — sets the noahark_session cookie. Response: "{ data: { signedIn: true } }"'
+        "401":
+          description: Invalid/expired challenge token, invalid verification code, or a replayed (already-accepted) TOTP counter (UNAUTHENTICATED) — deliberately one generic message per case, never distinguishing a replay from an ordinary wrong code.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "429":
+          description: Too many MFA attempts for this account or source IP — try again after the window elapses (RATE_LIMITED)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+  /auth/mfa/disable:
+    post:
+      operationId: disableMfa
+      summary: Disable MFA for the current user (requires re-entering the current password)
+      x-noahark-auth: session
+      x-noahark-csrf: true
+      x-noahark-permission: null
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password]
+              properties:
+                password: { type: string }
+      responses:
+        "200":
+          description: "{ data: { disabled: true } } — deletes the MfaCredential, cascading to all recovery codes."
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Incorrect password (FORBIDDEN)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+
+  /invitations/accept:
+    post:
+      operationId: acceptInvitation
+      summary: Accept a membership invitation, provisioning (or activating) the invited user
+      x-noahark-auth: public
+      x-noahark-csrf: true
+      x-noahark-permission: null
+      security: []
+      description: >
+        The invitation token is the authorization artifact. `password` is
+        required only if no existing User account matches the invited
+        email. Automatically signs the accepting user in (sets the session
+        cookie) and applies the pre-configured intendedRoleId/
+        intendedLegalEntityId, if any, at acceptance time.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: { type: string }
+                password:
+                  {
+                    type: string,
+                    minLength: 12,
+                    description: Required only when no existing account matches the invited email.,
+                  }
+                name: { type: string, minLength: 1, maxLength: 200 }
+      responses:
+        "200":
+          description: "{ data: { tenantId: string } } — sets the noahark_session cookie."
+        "422":
+          description: Invalid or expired invitation, or a password is required (VALIDATION_FAILED)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+  /files/local/{fileId}:
+    get:
+      operationId: deliverSignedFile
+      summary: Serve a file's bytes given a fully-bound, valid HMAC signature
+      x-noahark-auth: public
+      x-noahark-csrf: false
+      x-noahark-permission: null
+      security: []
+      description: >
+        The signed query string IS the authorization artifact — minted only
+        for an already-authorized user by GET
+        /tenants/{tenantId}/files/{fileId}. (F-15, Phase 1B.1) The signature
+        binds fileId+storageKey+version+operation+expiresAt; the exact
+        FileObject row is then loaded through a narrowly-scoped delivery
+        context (not a privileged client) and its LIVE status/revokedAt/
+        version are re-checked, so delete/quarantine/revoke/content-
+        replacement instantly invalidate every previously-issued URL for
+        the file, even before its own 300s TTL elapses. Response is raw
+        bytes (not the {data} envelope), `Content-Disposition: attachment`,
+        `Cache-Control: private, max-age=0, no-store`.
+      parameters:
+        - { $ref: "#/components/parameters/fileId" }
+        - name: sk
+          in: query
+          required: true
+          schema: { type: string }
+          description: storageKey — part of the signed payload, verified but never trusted for the actual byte read (the DB-loaded key is used instead).
+        - name: v
+          in: query
+          required: true
+          schema: { type: integer }
+          description: The FileObject version this signature was minted against.
+        - name: exp
+          in: query
+          required: true
+          schema: { type: integer }
+          description: Signature expiry, epoch milliseconds.
+        - name: sig
+          in: query
+          required: true
+          schema: { type: string }
+          description: 64-character lowercase-hex HMAC-SHA256 signature.
+      responses:
+        "200":
+          description: File bytes
+          content:
+            application/octet-stream: {}
+        "404":
+          description: >
+            NOT_FOUND — covers every failure mode (bad signature, expired,
+            deleted, quarantined, revoked, stale version, malformed input)
+            with one identical response, deliberately, so this endpoint
+            never becomes a file-existence or signature-validity oracle.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "422":
+          description: Missing or non-numeric signature parameters (VALIDATION_FAILED)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+  /tenants/{tenantId}:
+    get:
+      operationId: getTenant
+      summary: Get tenant details
+      x-noahark-permission: tenant:read
+      x-noahark-csrf: false
+      parameters: [{ $ref: "#/components/parameters/tenantId" }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  {
+                    data:
+                      {
+                        type: object,
+                        properties: { tenant: { $ref: "#/components/schemas/Tenant" } },
+                      },
+                  }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      operationId: updateTenant
+      summary: Update tenant details
+      x-noahark-permission: tenant:update
+      x-noahark-csrf: true
+      parameters: [{ $ref: "#/components/parameters/tenantId" }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: { name: { type: string, minLength: 1, maxLength: 200 } }
+      responses:
+        "200": { description: OK }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+
+  /tenants/{tenantId}/legal-entities:
+    get:
+      operationId: listLegalEntities
+      summary: List legal entities
+      x-noahark-permission: legal_entity:read
+      x-noahark-csrf: false
+      parameters: [{ $ref: "#/components/parameters/tenantId" }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      legalEntities:
+                        type: array
+                        items: { $ref: "#/components/schemas/LegalEntity" }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    post:
+      operationId: createLegalEntity
+      summary: Create a legal entity
+      x-noahark-permission: legal_entity:create
+      x-noahark-csrf: true
+      description: >
+        jurisdiction and functionalCurrency must be a valid SG/MY/ID pairing
+        ({SG:SGD, MY:MYR, ID:IDR}) — rejected with VALIDATION_FAILED
+        otherwise (LEGAL_ENTITY_ARCHITECTURE.md §2).
+      parameters: [{ $ref: "#/components/parameters/tenantId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, jurisdiction, functionalCurrency, timeZone]
+              properties:
+                name: { type: string, minLength: 1, maxLength: 200 }
+                jurisdiction: { type: string, enum: [SG, MY, ID] }
+                functionalCurrency: { type: string, enum: [SGD, MYR, IDR] }
+                timeZone: { type: string, minLength: 1 }
+                defaultLanguage: { type: string, enum: [EN, MS, ID], default: EN }
+                registeredIdentifier: { type: string, maxLength: 100 }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  {
+                    data:
+                      {
+                        type: object,
+                        properties:
+                          { legalEntity: { $ref: "#/components/schemas/LegalEntity" } },
+                      },
+                  }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+
+  /tenants/{tenantId}/legal-entities/{legalEntityId}:
+    patch:
+      operationId: updateLegalEntity
+      summary: Update a legal entity (name/timeZone/defaultLanguage/registeredIdentifier only — jurisdiction and functionalCurrency are fixed at creation)
+      x-noahark-permission: legal_entity:update
+      x-noahark-csrf: true
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/legalEntityId" }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string, minLength: 1, maxLength: 200 }
+                timeZone: { type: string, minLength: 1 }
+                defaultLanguage: { type: string, enum: [EN, MS, ID] }
+                registeredIdentifier: { type: string, maxLength: 100 }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  {
+                    data:
+                      {
+                        type: object,
+                        properties:
+                          { legalEntity: { $ref: "#/components/schemas/LegalEntity" } },
+                      },
+                  }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+
+  /tenants/{tenantId}/legal-entities/{legalEntityId}/settings:
+    get:
+      operationId: listLegalEntitySettings
+      summary: List legal-entity-scoped settings
+      x-noahark-permission: settings:read
+      x-noahark-csrf: false
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/legalEntityId" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      settings:
+                        type: array
+                        items: { $ref: "#/components/schemas/LegalEntitySetting" }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    patch:
+      operationId: updateLegalEntitySetting
+      summary: Upsert a single legal-entity-scoped setting
+      x-noahark-permission: settings:update
+      x-noahark-csrf: true
+      description: value is additionally validated per-key by @noahark/config's validateLegalEntitySettingValue.
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/legalEntityId" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [key, value]
+              properties:
+                key: { type: string, minLength: 1 }
+                value: {}
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  {
+                    data:
+                      {
+                        type: object,
+                        properties:
+                          {
+                            setting: { $ref: "#/components/schemas/LegalEntitySetting" },
+                          },
+                      },
+                  }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+
+  /tenants/{tenantId}/legal-entities/{legalEntityId}/access:
+    get:
+      operationId: listLegalEntityAccessGrants
+      summary: List users granted access to this legal entity
+      x-noahark-permission: legal_entity_membership:read
+      x-noahark-csrf: false
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/legalEntityId" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      grants:
+                        type: array
+                        items: { $ref: "#/components/schemas/LegalEntityMembership" }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    post:
+      operationId: grantLegalEntityAccess
+      summary: Grant (or reactivate) a user's access to this legal entity
+      x-noahark-permission: legal_entity_membership:grant
+      x-noahark-csrf: true
+      description: Self-grant is explicitly blocked (assertCanGrantLegalEntityAccess). Upsert — reactivates a previously SUSPENDED grant.
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/legalEntityId" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [userId]
+              properties:
+                userId: { type: string, minLength: 1 }
+      responses:
+        "201":
+          description: Created (or reactivated)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  {
+                    data:
+                      {
+                        type: object,
+                        properties:
+                          {
+                            grant: { $ref: "#/components/schemas/LegalEntityMembership" },
+                          },
+                      },
+                  }
+        "403":
+          description: Missing permission, or attempted self-grant (FORBIDDEN)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "409":
+          description: Target user is not an active member of this tenant (CONFLICT)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+
+  /tenants/{tenantId}/legal-entities/{legalEntityId}/access/{userId}:
+    delete:
+      operationId: revokeLegalEntityAccess
+      summary: Revoke (suspend) a user's access to this legal entity
+      x-noahark-permission: legal_entity_membership:revoke
+      x-noahark-csrf: true
+      description: Self-revocation is explicitly blocked.
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/legalEntityId" }
+        - { $ref: "#/components/parameters/grantUserId" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  {
+                    data:
+                      {
+                        type: object,
+                        properties:
+                          {
+                            grant: { $ref: "#/components/schemas/LegalEntityMembership" },
+                          },
+                      },
+                  }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: You cannot revoke your own legal-entity access (CONFLICT)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+  /tenants/{tenantId}/memberships:
+    get:
+      operationId: listMemberships
+      summary: List tenant memberships
+      x-noahark-permission: membership:read
+      x-noahark-csrf: false
+      parameters: [{ $ref: "#/components/parameters/tenantId" }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      memberships:
+                        type: array
+                        items: { $ref: "#/components/schemas/TenantMembership" }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /tenants/{tenantId}/memberships/{membershipId}:
+    patch:
+      operationId: updateMembershipStatus
+      summary: Suspend or reactivate a tenant membership
+      x-noahark-permission: membership:update
+      x-noahark-csrf: true
+      description: Self-suspend/self-reactivate is explicitly blocked.
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/membershipId" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [ACTIVE, SUSPENDED] }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  {
+                    data:
+                      {
+                        type: object,
+                        properties:
+                          {
+                            membership: { $ref: "#/components/schemas/TenantMembership" },
+                          },
+                      },
+                  }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: You cannot change your own membership status (CONFLICT)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+
+  /tenants/{tenantId}/invitations:
+    get:
+      operationId: listInvitations
+      summary: List membership invitations
+      x-noahark-permission: membership:read
+      x-noahark-csrf: false
+      parameters: [{ $ref: "#/components/parameters/tenantId" }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      invitations:
+                        type: array
+                        items: { $ref: "#/components/schemas/MembershipInvitation" }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    post:
+      operationId: createInvitation
+      summary: Invite a person to join the tenant by email
+      x-noahark-permission: membership:invite
+      x-noahark-csrf: true
+      description: >
+        If intendedRoleId is set, the caller must already hold every
+        permission that role grants (no delegation beyond your own
+        authority). If intendedLegalEntityId is set, the caller must hold
+        legal_entity_membership:grant for it. Phase 1 has no production
+        email provider (AD-3) — the raw acceptance token is returned once
+        in the response AND logged via the console provider; the admin UI
+        surfaces the accept link directly for hand-off.
+      parameters: [{ $ref: "#/components/parameters/tenantId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, format: email }
+                intendedRoleId: { type: [string, "null"] }
+                intendedLegalEntityId: { type: [string, "null"] }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      invitation:
+                        type: object
+                        properties:
+                          id: { type: string }
+                          email: { type: string }
+                          expiresAt: { type: string, format: date-time }
+                      rawToken:
+                        type: string
+                        description: The unhashed acceptance token — returned exactly once.
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+
+  /tenants/{tenantId}/invitations/{invitationId}:
+    delete:
+      operationId: revokeInvitation
+      summary: Revoke a pending invitation
+      x-noahark-permission: membership:invite
+      x-noahark-csrf: true
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/invitationId" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  { data: { $ref: "#/components/schemas/MembershipInvitation" } }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Only a pending invitation can be revoked (CONFLICT)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+  /tenants/{tenantId}/roles:
+    get:
+      operationId: listRoles
+      summary: List roles
+      x-noahark-permission: role:read
+      x-noahark-csrf: false
+      parameters: [{ $ref: "#/components/parameters/tenantId" }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      roles:
+                        type: array
+                        items: { $ref: "#/components/schemas/Role" }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    post:
+      operationId: createRole
+      summary: Create a custom role
+      x-noahark-permission: role:create
+      x-noahark-csrf: true
+      description: The caller cannot grant a permission they do not themselves hold (no self-escalation via role creation).
+      parameters: [{ $ref: "#/components/parameters/tenantId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [key, name]
+              properties:
+                key:
+                  { type: string, pattern: "^[a-z0-9_]+$", minLength: 1, maxLength: 50 }
+                name: { type: string, minLength: 1, maxLength: 100 }
+                description: { type: string, maxLength: 500 }
+                permissionKeys: { type: array, items: { type: string }, default: [] }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  {
+                    data:
+                      {
+                        type: object,
+                        properties: { role: { $ref: "#/components/schemas/Role" } },
+                      },
+                  }
+        "403":
+          description: Missing role:create, or attempted to grant a permission the caller does not hold (FORBIDDEN)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "409":
+          description: A role with this key already exists (CONFLICT)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+
+  /tenants/{tenantId}/roles/{roleId}:
+    patch:
+      operationId: updateRolePermissions
+      summary: Replace a role's permission set
+      x-noahark-permission: role:update
+      x-noahark-csrf: true
+      description: System roles reject this with FORBIDDEN. No self-escalation, same rule as create.
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/roleId" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [permissionKeys]
+              properties:
+                permissionKeys: { type: array, items: { type: string } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  {
+                    data:
+                      {
+                        type: object,
+                        properties: { role: { $ref: "#/components/schemas/Role" } },
+                      },
+                  }
+        "403":
+          description: Missing role:update, escalation attempt, or a system role (FORBIDDEN)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+    delete:
+      operationId: deleteRole
+      summary: Delete a role
+      x-noahark-permission: role:delete
+      x-noahark-csrf: true
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/roleId" }
+      responses:
+        "200":
+          description: "{ data: { id, deleted: true } }"
+        "403":
+          description: System roles cannot be deleted (FORBIDDEN)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Cannot delete a role that is currently assigned (CONFLICT)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+  /tenants/{tenantId}/role-assignments:
+    post:
+      operationId: assignRole
+      summary: Assign a role (optionally scoped to a legal entity) to a membership
+      x-noahark-permission: role:assign
+      x-noahark-csrf: true
+      description: >
+        Enforced via assertCanAssignRole — self-assignment is blocked, and
+        the caller cannot delegate a role whose permissions exceed their
+        own. Writes both an audit event and an outbox event
+        (membership_role.assigned).
+      parameters: [{ $ref: "#/components/parameters/tenantId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tenantMembershipId, roleId]
+              properties:
+                tenantMembershipId: { type: string, minLength: 1 }
+                roleId: { type: string, minLength: 1 }
+                legalEntityId: { type: [string, "null"], default: null }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  {
+                    data:
+                      {
+                        type: object,
+                        properties:
+                          { assignment: { $ref: "#/components/schemas/MembershipRole" } },
+                      },
+                  }
+        "403":
+          description: Missing role:assign, self-assignment, or escalation attempt (FORBIDDEN)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+
+  /tenants/{tenantId}/role-assignments/{assignmentId}:
+    delete:
+      operationId: unassignRole
+      summary: Remove a role assignment
+      x-noahark-permission: role:assign
+      x-noahark-csrf: true
+      description: Self-unassignment is explicitly blocked.
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/assignmentId" }
+      responses:
+        "200":
+          description: "{ data: { id, deleted: true } }"
+        "403":
+          description: You cannot change your own role assignment (FORBIDDEN)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /tenants/{tenantId}/settings:
+    get:
+      operationId: listTenantSettings
+      summary: List tenant-wide settings
+      x-noahark-permission: settings:read
+      x-noahark-csrf: false
+      parameters: [{ $ref: "#/components/parameters/tenantId" }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      settings:
+                        type: array
+                        items: { $ref: "#/components/schemas/TenantSetting" }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    patch:
+      operationId: updateTenantSetting
+      summary: Upsert a single tenant-wide setting
+      x-noahark-permission: settings:update
+      x-noahark-csrf: true
+      description: value is additionally validated per-key by @noahark/config's validateTenantSettingValue.
+      parameters: [{ $ref: "#/components/parameters/tenantId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [key, value]
+              properties:
+                key: { type: string, minLength: 1 }
+                value: {}
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  {
+                    data:
+                      {
+                        type: object,
+                        properties:
+                          { setting: { $ref: "#/components/schemas/TenantSetting" } },
+                      },
+                  }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+
+  /tenants/{tenantId}/audit:
+    get:
+      operationId: listAuditEvents
+      summary: List this tenant's audit trail
+      x-noahark-permission: audit:read
+      x-noahark-csrf: false
+      description: Cursor-paginated on the hash chain's own monotonic `sequence` (F-32, Phase 1B.1) — not createdAt, which ties under real concurrency.
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/cursor" }
+        - { $ref: "#/components/parameters/limit" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { data: { $ref: "#/components/schemas/AuditEventPage" } }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          description: Invalid pagination cursor (VALIDATION_FAILED)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+  /tenants/{tenantId}/approvals:
+    get:
+      operationId: listApprovalRequests
+      summary: List approval requests
+      x-noahark-permission: approval:read
+      x-noahark-csrf: false
+      parameters: [{ $ref: "#/components/parameters/tenantId" }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      requests:
+                        type: array
+                        items: { $ref: "#/components/schemas/ApprovalRequest" }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    post:
+      operationId: submitDemoApproval
+      summary: Submit the neutral demo approval workflow (proves the approval engine end to end — not a real business document)
+      x-noahark-permission: approval:submit
+      x-noahark-csrf: true
+      parameters: [{ $ref: "#/components/parameters/tenantId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title]
+              properties:
+                title: { type: string, minLength: 1, maxLength: 200 }
+                legalEntityId: { type: [string, "null"], default: null }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      subject: {}
+                      request: { $ref: "#/components/schemas/ApprovalRequest" }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: No active approval policy for demo.approval_subject (CONFLICT)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        default:
+          description: MODULE_DISABLED if the tenant has disabled the "approvals" module
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+  /tenants/{tenantId}/approvals/{requestId}/decide:
+    post:
+      operationId: decideApproval
+      summary: Approve, reject or cancel an approval request
+      x-noahark-permission: approval:decide
+      x-noahark-csrf: true
+      description: >
+        Requires BOTH approval:decide AND the caller holding the specific
+        role the current step names as its approver (a sixth, distinct
+        authorization check — assertApprovalAuthority in @noahark/workflow),
+        except for `action: CANCEL`, which is authorized solely by "you are
+        the submitter of your own still-pending request" and does NOT
+        require approval:decide. Self-approval is rejected unless the
+        policy explicitly sets allowSelfApproval. Optimistic concurrency
+        via expectedVersion, double-checked at the DB layer with an atomic
+        UPDATE ... WHERE version = expectedVersion (F-22, Phase 1B.1
+        confirms this closes a genuine two-approver race, not just
+        sequential re-decision).
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/approvalRequestId" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action, expectedVersion]
+              properties:
+                action: { type: string, enum: [APPROVE, REJECT, CANCEL] }
+                comment: { type: string, maxLength: 1000 }
+                expectedVersion:
+                  type: integer
+                  description: Optimistic-concurrency token from the last read of this request's `version`.
+      responses:
+        "200":
+          description: Decision recorded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      status:
+                        { type: string, enum: [PENDING, APPROVED, REJECTED, CANCELLED] }
+                      currentStepOrder: { type: integer }
+                      version: { type: integer }
+                      decision: { $ref: "#/components/schemas/ApprovalDecision" }
+        "403":
+          description: Wrong approver role, or self-approval not permitted by policy (FORBIDDEN) — also writes an authorization.denied audit event before responding
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: No approval step defined for the current order, or an invalid state transition (CONFLICT)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        default:
+          description: STALE_VERSION (409) if expectedVersion no longer matches, or MODULE_DISABLED (403) if "approvals" is disabled for the tenant
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+  /tenants/{tenantId}/files:
+    post:
+      operationId: uploadFile
+      summary: Upload a file
+      x-noahark-permission: file:upload
+      x-noahark-csrf: true
+      description: >
+        multipart/form-data, not JSON. Server-side MIME sniffing (never
+        trusts the client-supplied content type); SHA-256 hashed; stored
+        under a randomized, tenant-namespaced key. No malware scanning in
+        Phase 1 (explicit, documented gap — see uploadFile's own doc
+        comment in packages/files).
+      parameters: [{ $ref: "#/components/parameters/tenantId" }]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file, ownerEntityType, ownerEntityId]
+              properties:
+                file: { type: string, format: binary }
+                ownerEntityType: { type: string, minLength: 1 }
+                ownerEntityId: { type: string, minLength: 1 }
+                legalEntityId: { type: [string, "null"] }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  {
+                    data:
+                      {
+                        type: object,
+                        properties: { file: { $ref: "#/components/schemas/FileObject" } },
+                      },
+                  }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          description: "Not multipart/form-data, missing file field, empty file, or exceeds 25 MiB (VALIDATION_FAILED)"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        default:
+          description: MODULE_DISABLED if the tenant has disabled the "files" module
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+  /tenants/{tenantId}/files/{fileId}:
+    get:
+      operationId: getSignedDownloadUrl
+      summary: Mint a short-lived signed download URL for a file
+      x-noahark-permission: file:read
+      x-noahark-csrf: false
+      description: Permission is scoped to the FILE's own legal entity, not blindly tenant-wide. The returned URL is valid for 300 seconds and points at GET /files/local/{fileId}.
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/fileId" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      url: { type: string }
+                      expiresAt: { type: integer, description: epoch milliseconds }
+                      file: { $ref: "#/components/schemas/FileObject" }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Missing, not ACTIVE, or revoked (NOT_FOUND)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    delete:
+      operationId: deleteFile
+      summary: Soft-delete a file
+      x-noahark-permission: file:delete
+      x-noahark-csrf: true
+      description: Sets status DELETED and bumps version — every previously-issued signed URL for this file is instantly invalidated. Physical bytes are retained (no hard delete in Phase 1).
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/fileId" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  {
+                    data:
+                      {
+                        type: object,
+                        properties: { file: { $ref: "#/components/schemas/FileObject" } },
+                      },
+                  }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Missing or already DELETED (NOT_FOUND)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    patch:
+      operationId: quarantineOrRevokeFile
+      summary: Quarantine a file, or explicitly revoke its outstanding signed URLs
+      x-noahark-permission: file:administer
+      x-noahark-csrf: true
+      description: >
+        Both actions bump version, instantly invalidating every previously-
+        issued signed URL. quarantine additionally sets status=QUARANTINED;
+        revoke sets revokedAt without changing status (the file can be
+        re-signed immediately once un-revoked — not built in Phase 1).
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/fileId" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action: { type: string, enum: [quarantine, revoke] }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  {
+                    data:
+                      {
+                        type: object,
+                        properties: { file: { $ref: "#/components/schemas/FileObject" } },
+                      },
+                  }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Missing or already DELETED (NOT_FOUND)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+
+  /tenants/{tenantId}/notifications:
+    get:
+      operationId: listNotifications
+      summary: List the current user's own notifications in this tenant
+      x-noahark-permission: null
+      x-noahark-csrf: false
+      description: Implicitly scoped to the caller's own recipientUserId — not a general permission. Capped at 100 rows; no pagination cursor yet.
+      parameters: [{ $ref: "#/components/parameters/tenantId" }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      notifications:
+                        type: array
+                        items: { $ref: "#/components/schemas/Notification" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: No active membership in this tenant (FORBIDDEN)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+  /tenants/{tenantId}/notifications/{notificationId}/read:
+    post:
+      operationId: markNotificationRead
+      summary: Mark one of the current user's own notifications as read
+      x-noahark-permission: null
+      x-noahark-csrf: true
+      description: Scoped by recipientUserId in the WHERE clause — a user can never mark another user's notification as read even by guessing/enumerating an id.
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/notificationId" }
+      responses:
+        "200":
+          description: "{ data: { read: true } }"
+        "401":
+          $ref: "#/components/responses/Unauthorized"

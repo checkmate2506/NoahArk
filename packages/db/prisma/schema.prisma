@@ -1,0 +1,1150 @@
+// NoahArk — Phase 1 foundation schema.
+// Only tenancy, identity, RBAC, audit, approvals, jobs/outbox, files and
+// settings are modelled here. No CRM/accounting/payroll/tax business entities
+// and no statutory formulas — see docs/PHASE_01_FOUNDATION.md.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ---------------------------------------------------------------------------
+// Enums (deliberately restricted — SG/MY/ID only, per CLAUDE.md scope)
+// ---------------------------------------------------------------------------
+
+enum Jurisdiction {
+  SG
+  MY
+  ID
+}
+
+enum Currency {
+  SGD
+  MYR
+  IDR
+}
+
+enum Language {
+  EN
+  MS
+  ID
+}
+
+enum TenantStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+enum LegalEntityStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum MembershipStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+enum InvitationStatus {
+  PENDING
+  ACCEPTED
+  REVOKED
+  EXPIRED
+}
+
+enum ApprovalRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  CANCELLED
+}
+
+enum ApprovalDecisionAction {
+  APPROVE
+  REJECT
+  CANCEL
+}
+
+enum AuditActorType {
+  USER
+  SYSTEM
+}
+
+enum AuditOutcome {
+  SUCCESS
+  FAILURE
+  DENIED
+}
+
+enum OutboxStatus {
+  PENDING
+  PROCESSING
+  PROCESSED
+  FAILED
+}
+
+enum JobStatus {
+  PENDING
+  PROCESSING
+  SUCCEEDED
+  FAILED
+  DEAD
+}
+
+enum FileStatus {
+  ACTIVE
+  DELETED
+  QUARANTINED
+}
+
+enum NotificationChannel {
+  IN_APP
+  EMAIL
+}
+
+enum CustomFieldDataType {
+  STRING
+  NUMBER
+  BOOLEAN
+  DATE
+}
+
+// ---------------------------------------------------------------------------
+// Tenant & legal entity
+// ---------------------------------------------------------------------------
+
+model Tenant {
+  id        String       @id @default(cuid())
+  name      String
+  slug      String       @unique
+  status    TenantStatus @default(ACTIVE)
+  createdAt DateTime     @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime     @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  entitlements         TenantEntitlement[]
+  settings             TenantSetting[]
+  legalEntities        LegalEntity[]
+  memberships          TenantMembership[]
+  legalEntityMembers   LegalEntityMembership[]
+  businessUnits        BusinessUnit[]
+  departments          Department[]
+  teams                Team[]
+  branches             Branch[]
+  warehouses           Warehouse[]
+  costCentres          CostCentre[]
+  roles                Role[]
+  rolePermissions      RolePermission[]
+  membershipRoles      MembershipRole[]
+  fieldPolicies        FieldPolicy[]
+  approvalPolicies     ApprovalPolicy[]
+  approvalSteps        ApprovalStep[]
+  approvalRequests     ApprovalRequest[]
+  approvalDecisions    ApprovalDecision[]
+  auditEvents          AuditEvent[]
+  outboxEvents         OutboxEvent[]
+  notifications        Notification[]
+  notificationPrefs    NotificationPreference[]
+  fileObjects          FileObject[]
+  attachments          Attachment[]
+  customFieldDefs      CustomFieldDefinition[]
+  customFieldValues    CustomFieldValue[]
+  idempotencyKeys      IdempotencyKey[]
+  demoApprovalSubjects DemoApprovalSubject[]
+  invitations          MembershipInvitation[]
+
+  @@map("tenant")
+}
+
+/**
+ * Foundation for SaaS plan enforcement (billing itself is deferred — AD-2).
+ * A module the tenant hasn't been entitled to (or has had disabled) is
+ * rejected server-side with MODULE_DISABLED, independent of the caller's
+ * permissions — see entitlementService.ts.
+ */
+model TenantEntitlement {
+  id        String   @id @default(cuid())
+  tenantId  String   @map("tenant_id")
+  moduleKey String   @map("module_key")
+  enabled   Boolean  @default(true)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, moduleKey])
+  @@map("tenant_entitlement")
+}
+
+model TenantSetting {
+  id            String   @id @default(cuid())
+  tenantId      String   @map("tenant_id")
+  key           String
+  value         Json
+  updatedByUser String?  @map("updated_by_user_id")
+  updatedAt     DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, key])
+  @@map("tenant_setting")
+}
+
+model LegalEntity {
+  id                   String            @id @default(cuid())
+  tenantId             String            @map("tenant_id")
+  name                 String
+  jurisdiction         Jurisdiction
+  functionalCurrency   Currency          @map("functional_currency")
+  timeZone             String            @map("time_zone")
+  defaultLanguage      Language          @default(EN) @map("default_language")
+  status               LegalEntityStatus @default(ACTIVE)
+  // Registered identifiers are jurisdiction-specific and intentionally opaque
+  // (UEN / SSM+TIN / NPWP+NITKU) — no format validation beyond non-empty,
+  // per REGULATORY_SOURCE_REGISTER.md (formats not yet primary-sourced).
+  registeredIdentifier String?           @map("registered_identifier")
+  createdAt            DateTime          @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt            DateTime          @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  tenant               Tenant                  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  settings             LegalEntitySetting[]
+  legalEntityMembers   LegalEntityMembership[]
+  businessUnits        BusinessUnit[]
+  departments          Department[]
+  teams                Team[]
+  branches             Branch[]
+  warehouses           Warehouse[]
+  costCentres          CostCentre[]
+  membershipRoles      MembershipRole[]
+  approvalPolicies     ApprovalPolicy[]
+  approvalRequests     ApprovalRequest[]
+  auditEvents          AuditEvent[]
+  outboxEvents         OutboxEvent[]
+  notifications        Notification[]
+  fileObjects          FileObject[]
+  customFieldDefs      CustomFieldDefinition[]
+  demoApprovalSubjects DemoApprovalSubject[]
+
+  @@index([tenantId])
+  @@map("legal_entity")
+}
+
+model LegalEntitySetting {
+  id            String   @id @default(cuid())
+  tenantId      String   @map("tenant_id")
+  legalEntityId String   @map("legal_entity_id")
+  key           String
+  value         Json
+  updatedByUser String?  @map("updated_by_user_id")
+  updatedAt     DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  legalEntity LegalEntity @relation(fields: [legalEntityId], references: [id], onDelete: Cascade)
+
+  @@unique([legalEntityId, key])
+  @@index([tenantId, legalEntityId])
+  @@map("legal_entity_setting")
+}
+
+// --- organisational structure (thin, structural only in Phase 1) -----------
+
+model BusinessUnit {
+  id            String   @id @default(cuid())
+  tenantId      String   @map("tenant_id")
+  legalEntityId String   @map("legal_entity_id")
+  name          String
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  tenant      Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  legalEntity LegalEntity  @relation(fields: [legalEntityId], references: [id], onDelete: Cascade)
+  departments Department[]
+
+  @@index([tenantId, legalEntityId])
+  @@map("business_unit")
+}
+
+model Department {
+  id             String   @id @default(cuid())
+  tenantId       String   @map("tenant_id")
+  legalEntityId  String   @map("legal_entity_id")
+  businessUnitId String   @map("business_unit_id")
+  name           String
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  tenant       Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  legalEntity  LegalEntity  @relation(fields: [legalEntityId], references: [id], onDelete: Cascade)
+  businessUnit BusinessUnit @relation(fields: [businessUnitId], references: [id], onDelete: Cascade)
+  teams        Team[]
+
+  @@index([tenantId, legalEntityId])
+  @@map("department")
+}
+
+model Team {
+  id            String   @id @default(cuid())
+  tenantId      String   @map("tenant_id")
+  legalEntityId String   @map("legal_entity_id")
+  departmentId  String   @map("department_id")
+  name          String
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  tenant      Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  legalEntity LegalEntity @relation(fields: [legalEntityId], references: [id], onDelete: Cascade)
+  department  Department  @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, legalEntityId])
+  @@map("team")
+}
+
+model Branch {
+  id            String   @id @default(cuid())
+  tenantId      String   @map("tenant_id")
+  legalEntityId String   @map("legal_entity_id")
+  name          String
+  address       Json?
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  tenant      Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  legalEntity LegalEntity @relation(fields: [legalEntityId], references: [id], onDelete: Cascade)
+  warehouses  Warehouse[]
+
+  @@index([tenantId, legalEntityId])
+  @@map("branch")
+}
+
+model Warehouse {
+  id            String   @id @default(cuid())
+  tenantId      String   @map("tenant_id")
+  legalEntityId String   @map("legal_entity_id")
+  branchId      String?  @map("branch_id")
+  name          String
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  tenant      Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  legalEntity LegalEntity @relation(fields: [legalEntityId], references: [id], onDelete: Cascade)
+  branch      Branch?     @relation(fields: [branchId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId, legalEntityId])
+  @@map("warehouse")
+}
+
+model CostCentre {
+  id            String   @id @default(cuid())
+  tenantId      String   @map("tenant_id")
+  legalEntityId String   @map("legal_entity_id")
+  code          String
+  name          String
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  tenant      Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  legalEntity LegalEntity @relation(fields: [legalEntityId], references: [id], onDelete: Cascade)
+
+  @@unique([legalEntityId, code])
+  @@index([tenantId, legalEntityId])
+  @@map("cost_centre")
+}
+
+// ---------------------------------------------------------------------------
+// Identity & authentication (Auth.js-compatible + NoahArk extensions)
+// ---------------------------------------------------------------------------
+
+model User {
+  id                String    @id @default(cuid())
+  email             String    @unique
+  emailVerified     DateTime? @map("email_verified") @db.Timestamptz(3)
+  name              String?
+  image             String?
+  preferredLanguage Language? @map("preferred_language")
+  isDisabled        Boolean   @default(false) @map("is_disabled")
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt         DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  credential                UserCredential?
+  accounts                  Account[]
+  sessions                  Session[]
+  tenantMemberships         TenantMembership[]
+  legalEntityMembers        LegalEntityMembership[]
+  grantedLegalEntityMembers LegalEntityMembership[]  @relation("LegalEntityMembershipGrantedBy")
+  assignedMembershipRoles   MembershipRole[]         @relation("MembershipRoleAssignedBy")
+  submittedApprovals        ApprovalRequest[]        @relation("ApprovalRequestSubmittedBy")
+  approvalDecisions         ApprovalDecision[]
+  auditEventsAsActor        AuditEvent[]             @relation("AuditEventActor")
+  notifications             Notification[]
+  notificationPrefs         NotificationPreference[]
+  uploadedFiles             FileObject[]
+  attachmentsCreated        Attachment[]
+  demoApprovalSubjects      DemoApprovalSubject[]
+  mfaCredential             MfaCredential?
+  invitationsSent           MembershipInvitation[]   @relation("MembershipInvitationInvitedBy")
+
+  @@map("app_user")
+}
+
+// Password hashes live in a table separate from User so ordinary user
+// lookups/joins can never accidentally surface a hash.
+model UserCredential {
+  id           String   @id @default(cuid())
+  userId       String   @unique @map("user_id")
+  passwordHash String   @map("password_hash")
+  algorithm    String   @default("argon2id")
+  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_credential")
+}
+
+// F-3B (Phase 1B): TOTP MFA. Global identity table (like UserCredential) —
+// no RLS, no tenant_id, mirrors why passwords live in their own table:
+// ordinary user lookups/joins can never accidentally surface the secret.
+// `secretEncrypted` is AES-256-GCM-encrypted at rest (packages/auth's
+// mfaSecretCrypto.ts) using a key DERIVED from AUTH_SECRET (key
+// separation, no second required secret env var — same pattern as the
+// file-signing key in fileServiceWrapper.ts). Recovery codes are stored
+// ONLY as SHA-256 hashes, one row per code, each single-use.
+model MfaCredential {
+  id                  String    @id @default(cuid())
+  userId              String    @unique @map("user_id")
+  secretEncrypted     String    @map("secret_encrypted")
+  // Null until the enrolment flow's confirmation step succeeds — an
+  // unconfirmed secret does not gate sign-in (see mfaService.ts).
+  confirmedAt         DateTime? @map("confirmed_at") @db.Timestamptz(3)
+  // N-1 (Phase 1D): TOTP replay protection. The RFC 4226 HOTP counter
+  // (floor(unixSeconds / 30)) of the most recently ACCEPTED code — never
+  // the raw code/secret itself, just an integer position in the moving
+  // window. A code at or before this counter can never be accepted again,
+  // even if it is still within the ±1 step drift window verifyTotp allows
+  // — see mfaService.ts's atomic conditional update (WHERE
+  // last_used_totp_counter IS NULL OR < counter), which also makes two
+  // concurrent submissions of the SAME valid code resolve to exactly one
+  // success. Null until the first successful TOTP verification.
+  lastUsedTotpCounter Int?      @map("last_used_totp_counter")
+  createdAt           DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt           DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  user          User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  recoveryCodes MfaRecoveryCode[]
+
+  @@map("mfa_credential")
+}
+
+model MfaRecoveryCode {
+  id              String    @id @default(cuid())
+  mfaCredentialId String    @map("mfa_credential_id")
+  codeHash        String    @unique @map("code_hash")
+  usedAt          DateTime? @map("used_at") @db.Timestamptz(3)
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  mfaCredential MfaCredential @relation(fields: [mfaCredentialId], references: [id], onDelete: Cascade)
+
+  @@index([mfaCredentialId])
+  @@map("mfa_recovery_code")
+}
+
+// Auth.js adapter contract — unused by credentials auth today, kept so SSO
+// (AD-4) can be added later without a schema change.
+model Account {
+  id                String  @id @default(cuid())
+  userId            String  @map("user_id")
+  type              String
+  provider          String
+  providerAccountId String  @map("provider_account_id")
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@map("account")
+}
+
+model Session {
+  id                  String   @id @default(cuid())
+  sessionToken        String   @unique @map("session_token")
+  userId              String   @map("user_id")
+  expires             DateTime @db.Timestamptz(3)
+  // Last-selected context — a convenience hint only. The server ALWAYS
+  // re-validates tenant/legal-entity membership on every request; these
+  // fields are never trusted as the authorization source of truth.
+  activeTenantId      String?  @map("active_tenant_id")
+  activeLegalEntityId String?  @map("active_legal_entity_id")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // P1E-4 (Phase 1F): supports the worker's expired-session retention sweep
+  // (apps/web/lib/retentionMaintenance.ts).
+  @@index([expires])
+  @@map("session")
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime @db.Timestamptz(3)
+
+  @@unique([identifier, token])
+  // P1E-4 (Phase 1F): supports the worker's expired-token retention sweep
+  // (covers both email-verification and MFA-challenge tokens — see
+  // apps/web/lib/verificationTokenMaintenance.ts).
+  @@index([expires])
+  @@map("verification_token")
+}
+
+// F-9 (Phase 1B.1): shared, PostgreSQL-backed auth rate limiting — replaces
+// the in-memory limiter, which did not work across multiple application
+// instances. Fixed-window counters keyed by (dimension, key_hash,
+// window_start): `windowStart` is the window's own boundary
+// (floor(now / WINDOW_MS) * WINDOW_MS), so concurrent requests in the same
+// window race on a single row via `INSERT ... ON CONFLICT DO UPDATE
+// attempt_count = attempt_count + 1` (see rateLimiter.ts) — atomic,
+// concurrency-safe, no read-then-write race. `keyHash` is SHA-256 of the
+// normalised email or IP, never the raw value, so a database read never
+// discloses which specific account/address is near its limit in plaintext.
+// Global (not tenant-owned) — same identity-adjacent classification as
+// VerificationToken; no RLS.
+model AuthRateLimitBucket {
+  id           String             @id @default(cuid())
+  dimension    RateLimitDimension
+  keyHash      String             @map("key_hash")
+  windowStart  DateTime           @map("window_start") @db.Timestamptz(3)
+  attemptCount Int                @default(0) @map("attempt_count")
+  updatedAt    DateTime           @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@unique([dimension, keyHash, windowStart])
+  @@index([windowStart])
+  @@map("auth_rate_limit_bucket")
+}
+
+enum RateLimitDimension {
+  EMAIL
+  IP
+  // N-1 (Phase 1D): distinct MFA-challenge buckets — deliberately NOT
+  // sharing EMAIL/IP's counters, so a caller who has already exhausted
+  // their PASSWORD attempt budget (which stops before MFA is ever reached)
+  // doesn't confusingly bleed into the MFA counters, and vice versa.
+  // MFA_ACCOUNT is keyed by a hash of the userId (not email — the MFA
+  // challenge flow already has a resolved userId from the challenge
+  // token, unlike the password step which only has an email), so a fresh
+  // challenge token obtained after a correct password re-submission can
+  // never reset this counter — the limit follows the ACCOUNT, not the
+  // token.
+  MFA_ACCOUNT
+  MFA_IP
+}
+
+/**
+ * F-14/E2E (Phase 1B.1): test-only capture of "sent" emails, so an E2E
+ * suite driving the real product (not direct system-client writes) can
+ * retrieve a verification/invitation link the same way a real inbox would
+ * receive it. Never written to or read from unless BOTH `NODE_ENV !==
+ * "production"` AND `TEST_NOTIFICATION_CAPTURE === "1"` — see
+ * apps/web/lib/testEmailCapture.ts, the ONLY code path that touches this
+ * table. A production deployment (NODE_ENV=production) can never activate
+ * this even if TEST_NOTIFICATION_CAPTURE were mistakenly set — the check is
+ * doubled, not just env-var-gated. Global (no tenant_id) because email
+ * verification/invitation happen before any tenant is selected; no RLS
+ * policy exists for it — same posture as AuthRateLimitBucket above.
+ */
+model TestEmailCapture {
+  id        String   @id @default(cuid())
+  to        String
+  subject   String
+  body      String
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  @@index([to, createdAt])
+  // P1E-4 (Phase 1F): supports the worker's test-capture retention sweep
+  // (a plain createdAt scan, not scoped by `to` — the compound index above
+  // is for the read endpoint's own lookup, not this).
+  @@index([createdAt])
+  @@map("test_email_capture")
+}
+
+// ---------------------------------------------------------------------------
+// Memberships
+// ---------------------------------------------------------------------------
+
+model TenantMembership {
+  id              String           @id @default(cuid())
+  tenantId        String           @map("tenant_id")
+  userId          String           @map("user_id")
+  status          MembershipStatus @default(ACTIVE)
+  invitedByUserId String?          @map("invited_by_user_id")
+  createdAt       DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt       DateTime         @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  tenant          Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user            User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  membershipRoles MembershipRole[]
+
+  @@unique([tenantId, userId])
+  @@map("tenant_membership")
+}
+
+// F-3E (Phase 1B): membership invitation. Tenant-scoped (RLS: simple
+// tenant-only group, no legal_entity_id column — an invite MAY carry an
+// intended legal-entity grant, applied only on acceptance, but the
+// invitation row itself is tenant-wide). Deliberately references the
+// intended role/legal-entity by id rather than embedding a snapshot of
+// permissions — acceptance re-validates the inviter still holds the
+// authority to grant them (roleService/legalEntityService's existing
+// self-escalation guards), so a role edited/removed between invite and
+// accept cannot silently grant something the inviter no longer controls.
+model MembershipInvitation {
+  id                    String           @id @default(cuid())
+  tenantId              String           @map("tenant_id")
+  email                 String
+  tokenHash             String           @unique @map("token_hash")
+  invitedByUserId       String           @map("invited_by_user_id")
+  // Tenant-wide role to assign on acceptance — optional (an admin may
+  // invite someone with no role yet, to be assigned later).
+  intendedRoleId        String?          @map("intended_role_id")
+  // Legal entity to grant access to on acceptance — optional.
+  intendedLegalEntityId String?          @map("intended_legal_entity_id")
+  status                InvitationStatus @default(PENDING)
+  expiresAt             DateTime         @map("expires_at") @db.Timestamptz(3)
+  acceptedAt            DateTime?        @map("accepted_at") @db.Timestamptz(3)
+  revokedAt             DateTime?        @map("revoked_at") @db.Timestamptz(3)
+  createdAt             DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  tenant    Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  invitedBy User   @relation("MembershipInvitationInvitedBy", fields: [invitedByUserId], references: [id], onDelete: Restrict)
+
+  @@index([tenantId, email])
+  // P1E-4 (Phase 1F): supports the worker's terminal-invitation retention
+  // sweep (apps/web/lib/retentionMaintenance.ts).
+  @@index([status, expiresAt])
+  @@map("membership_invitation")
+}
+
+// Legal-entity access is granted independently of tenant membership and is
+// NEVER implied by it (non-transitive) — LEGAL_ENTITY_ARCHITECTURE.md §5.
+model LegalEntityMembership {
+  id              String           @id @default(cuid())
+  tenantId        String           @map("tenant_id")
+  legalEntityId   String           @map("legal_entity_id")
+  userId          String           @map("user_id")
+  status          MembershipStatus @default(ACTIVE)
+  grantedByUserId String?          @map("granted_by_user_id")
+  createdAt       DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt       DateTime         @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  tenant      Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  legalEntity LegalEntity @relation(fields: [legalEntityId], references: [id], onDelete: Cascade)
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  grantedBy   User?       @relation("LegalEntityMembershipGrantedBy", fields: [grantedByUserId], references: [id], onDelete: SetNull)
+
+  @@unique([legalEntityId, userId])
+  @@index([tenantId, legalEntityId])
+  @@map("legal_entity_membership")
+}
+
+// ---------------------------------------------------------------------------
+// RBAC
+// ---------------------------------------------------------------------------
+
+// Global, platform-maintained catalogue — not tenant-scoped. Seeded only;
+// the application role has SELECT-only privilege on this table (see the RLS
+// & grants migration).
+model Permission {
+  id          String @id @default(cuid())
+  key         String @unique
+  category    String
+  description String
+
+  rolePermissions RolePermission[]
+  fieldPolicies   FieldPolicy[]
+
+  @@map("permission")
+}
+
+model Role {
+  id          String   @id @default(cuid())
+  tenantId    String   @map("tenant_id")
+  key         String
+  name        String
+  description String?
+  // System roles are seeded per tenant at provisioning time and are
+  // protected from permission edits / deletion (app-layer AND a DB-level
+  // WITH CHECK policy — see the RLS migration).
+  isSystem    Boolean  @default(false) @map("is_system")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  tenant          Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  rolePermissions RolePermission[]
+  membershipRoles MembershipRole[]
+  approvalSteps   ApprovalStep[]
+
+  @@unique([tenantId, key])
+  @@map("role")
+}
+
+model RolePermission {
+  id           String @id @default(cuid())
+  tenantId     String @map("tenant_id")
+  roleId       String @map("role_id")
+  permissionId String @map("permission_id")
+
+  tenant     Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Restrict)
+
+  @@unique([roleId, permissionId])
+  @@index([tenantId])
+  @@map("role_permission")
+}
+
+// Assigns a Role to a TenantMembership. When legalEntityId is null the role
+// applies tenant-wide (subject to the separate legal-entity ACCESS check);
+// when set, the role only grants permissions within that legal entity.
+model MembershipRole {
+  id                 String   @id @default(cuid())
+  tenantId           String   @map("tenant_id")
+  tenantMembershipId String   @map("tenant_membership_id")
+  roleId             String   @map("role_id")
+  legalEntityId      String?  @map("legal_entity_id")
+  assignedByUserId   String   @map("assigned_by_user_id")
+  createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  tenant           Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenantMembership TenantMembership @relation(fields: [tenantMembershipId], references: [id], onDelete: Cascade)
+  role             Role             @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  legalEntity      LegalEntity?     @relation(fields: [legalEntityId], references: [id], onDelete: Cascade)
+  assignedBy       User             @relation("MembershipRoleAssignedBy", fields: [assignedByUserId], references: [id], onDelete: Restrict)
+
+  @@index([tenantId, legalEntityId])
+  @@map("membership_role")
+}
+
+// Foundation for field-level access control (HR/payroll will register real
+// protected fields in later phases — none exist yet in Phase 1).
+model FieldPolicy {
+  id                   String  @id @default(cuid())
+  tenantId             String? @map("tenant_id")
+  entityType           String  @map("entity_type")
+  fieldName            String  @map("field_name")
+  requiredPermissionId String  @map("required_permission_id")
+  description          String?
+
+  tenant             Tenant?    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  requiredPermission Permission @relation(fields: [requiredPermissionId], references: [id], onDelete: Restrict)
+
+  @@index([tenantId])
+  @@map("field_policy")
+}
+
+// ---------------------------------------------------------------------------
+// Approval foundation (generic — no business workflows)
+// ---------------------------------------------------------------------------
+
+model ApprovalPolicy {
+  id                String   @id @default(cuid())
+  tenantId          String   @map("tenant_id")
+  legalEntityId     String?  @map("legal_entity_id")
+  subjectType       String   @map("subject_type")
+  name              String
+  isActive          Boolean  @default(true) @map("is_active")
+  // F-18 (Phase 1B): default-DENIED. A submitter who also holds the
+  // approver role for a step cannot approve/reject their own request
+  // unless the policy explicitly opts in — segregation of duties by
+  // default, not by accident of role assignment.
+  allowSelfApproval Boolean  @default(false) @map("allow_self_approval")
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt         DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  tenant      Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  legalEntity LegalEntity?      @relation(fields: [legalEntityId], references: [id], onDelete: Cascade)
+  steps       ApprovalStep[]
+  requests    ApprovalRequest[]
+
+  @@index([tenantId, legalEntityId])
+  @@map("approval_policy")
+}
+
+model ApprovalStep {
+  id               String  @id @default(cuid())
+  tenantId         String  @map("tenant_id")
+  approvalPolicyId String  @map("approval_policy_id")
+  stepOrder        Int     @map("step_order")
+  approverRoleId   String  @map("approver_role_id")
+  name             String?
+
+  tenant         Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  approvalPolicy ApprovalPolicy @relation(fields: [approvalPolicyId], references: [id], onDelete: Cascade)
+  approverRole   Role           @relation(fields: [approverRoleId], references: [id], onDelete: Restrict)
+
+  @@unique([approvalPolicyId, stepOrder])
+  @@index([tenantId])
+  @@map("approval_step")
+}
+
+model ApprovalRequest {
+  id                String                @id @default(cuid())
+  tenantId          String                @map("tenant_id")
+  legalEntityId     String?               @map("legal_entity_id")
+  approvalPolicyId  String                @map("approval_policy_id")
+  subjectType       String                @map("subject_type")
+  subjectId         String                @map("subject_id")
+  status            ApprovalRequestStatus @default(PENDING)
+  currentStepOrder  Int                   @default(1) @map("current_step_order")
+  submittedByUserId String                @map("submitted_by_user_id")
+  submittedAt       DateTime              @default(now()) @map("submitted_at") @db.Timestamptz(3)
+  decidedAt         DateTime?             @map("decided_at") @db.Timestamptz(3)
+  // Optimistic concurrency — every state transition must supply the version
+  // it read; a stale write is rejected rather than silently overwritten.
+  version           Int                   @default(1)
+  createdAt         DateTime              @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt         DateTime              @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  tenant         Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  legalEntity    LegalEntity?       @relation(fields: [legalEntityId], references: [id], onDelete: Cascade)
+  approvalPolicy ApprovalPolicy     @relation(fields: [approvalPolicyId], references: [id], onDelete: Restrict)
+  submittedBy    User               @relation("ApprovalRequestSubmittedBy", fields: [submittedByUserId], references: [id], onDelete: Restrict)
+  decisions      ApprovalDecision[]
+
+  @@index([subjectType, subjectId])
+  @@index([tenantId, legalEntityId])
+  @@map("approval_request")
+}
+
+model ApprovalDecision {
+  id                String                 @id @default(cuid())
+  tenantId          String                 @map("tenant_id")
+  approvalRequestId String                 @map("approval_request_id")
+  stepOrder         Int                    @map("step_order")
+  action            ApprovalDecisionAction
+  actorUserId       String                 @map("actor_user_id")
+  comment           String?
+  decidedAt         DateTime               @default(now()) @map("decided_at") @db.Timestamptz(3)
+
+  tenant          Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  approvalRequest ApprovalRequest @relation(fields: [approvalRequestId], references: [id], onDelete: Cascade)
+  actor           User            @relation(fields: [actorUserId], references: [id], onDelete: Restrict)
+
+  // At most one recorded decision per step — prevents duplicate approval at
+  // the database level, not just in application logic.
+  @@unique([approvalRequestId, stepOrder])
+  @@index([tenantId])
+  @@map("approval_decision")
+}
+
+// Neutral, non-business resource used only to exercise the approval engine
+// end-to-end (sign-in → submit → approve/reject) in the admin UI and tests.
+model DemoApprovalSubject {
+  id              String   @id @default(cuid())
+  tenantId        String   @map("tenant_id")
+  legalEntityId   String?  @map("legal_entity_id")
+  title           String
+  createdByUserId String   @map("created_by_user_id")
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  tenant      Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  legalEntity LegalEntity? @relation(fields: [legalEntityId], references: [id], onDelete: Cascade)
+  createdBy   User         @relation(fields: [createdByUserId], references: [id], onDelete: Restrict)
+
+  @@index([tenantId, legalEntityId])
+  @@map("demo_approval_subject")
+}
+
+// ---------------------------------------------------------------------------
+// Audit (append-only, hash-chained)
+// ---------------------------------------------------------------------------
+
+model AuditEvent {
+  id            String         @id @default(cuid())
+  // Nullable: sign-in/sign-out/failed-login events happen before a tenant is
+  // selected and are not tenant-owned. These form their own hash chain
+  // (chain key = "platform") distinct from each tenant's chain — see
+  // packages/audit's auditWriter. Every other audited action IS tenant-owned
+  // and always sets this.
+  tenantId      String?        @map("tenant_id")
+  legalEntityId String?        @map("legal_entity_id")
+  actorUserId   String?        @map("actor_user_id")
+  actorType     AuditActorType @default(USER) @map("actor_type")
+  action        String
+  entityType    String         @map("entity_type")
+  entityId      String?        @map("entity_id")
+  beforeData    Json?          @map("before_data")
+  afterData     Json?          @map("after_data")
+  requestId     String?        @map("request_id")
+  ipAddress     String?        @map("ip_address")
+  userAgent     String?        @map("user_agent")
+  outcome       AuditOutcome   @default(SUCCESS)
+  // F-2/F-6 (Phase 1B): explicit chain identity + monotonic position, so the
+  // predecessor is looked up by (chainKey, sequence) rather than `createdAt
+  // DESC` — timestamps at TIMESTAMP(3) precision tie routinely under any
+  // real concurrency, which made the old lookup non-deterministic and able
+  // to fork the chain. `chainKey` is the tenantId for a tenant's chain, or
+  // the literal "__platform__" for pre-tenant-selection events (mirrors the
+  // RLS policy's IS NOT DISTINCT FROM tenantId matching). `sequence` is
+  // allocated 1, 2, 3, ... per chainKey while holding the same advisory
+  // lock that already serializes writers — see packages/audit's hashChain
+  // and apps/web's auditService.
+  chainKey      String         @map("chain_key")
+  sequence      BigInt
+  // Hash chain — prevHash links to the previous event's hash for this
+  // chain; hash covers this row's own content INCLUDING chainKey+sequence.
+  // No UPDATE/DELETE grant exists for the app role, enforced again by a
+  // block trigger — see the RLS & constraints migration. The trigger has no
+  // role bypass for ordinary application/worker roles, but the table owner
+  // can still disable it (documented residual risk — see
+  // docs/PHASE_01_IMPLEMENTATION.md "Audit integrity boundary").
+  prevHash      String?        @map("prev_hash")
+  hash          String
+  createdAt     DateTime       @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  // F-16: deliberately NOT Cascade/SetNull. The append-only trigger already
+  // makes both impossible in practice (proven: deleting a user or tenant
+  // referenced by any audit event is rejected by the trigger, not by these
+  // FKs) — declaring Cascade/SetNull here was misleading schema metadata
+  // that promised behaviour the database structurally refuses to perform.
+  // Restrict makes the real constraint explicit: a tenant or user that has
+  // ever produced an audit event can never be hard-deleted while that event
+  // exists. Lawful erasure/retention must use a lifecycle state (e.g.
+  // User.isDisabled, a future Tenant closure status) rather than deletion —
+  // see docs/PHASE_01_IMPLEMENTATION.md "Audit retention and erasure".
+  tenant      Tenant?      @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  legalEntity LegalEntity? @relation(fields: [legalEntityId], references: [id], onDelete: Restrict)
+  actor       User?        @relation("AuditEventActor", fields: [actorUserId], references: [id], onDelete: Restrict)
+
+  @@unique([chainKey, sequence])
+  @@index([tenantId, createdAt])
+  @@map("audit_event")
+}
+
+// ---------------------------------------------------------------------------
+// Jobs, outbox, notifications
+// ---------------------------------------------------------------------------
+
+model OutboxEvent {
+  id             String       @id @default(cuid())
+  tenantId       String       @map("tenant_id")
+  legalEntityId  String?      @map("legal_entity_id")
+  eventType      String       @map("event_type")
+  payload        Json
+  status         OutboxStatus @default(PENDING)
+  attempts       Int          @default(0)
+  // F-19 (Phase 1B.1): same lease design as BackgroundJob — see its comment.
+  leaseExpiresAt DateTime?    @map("lease_expires_at") @db.Timestamptz(3)
+  heartbeatAt    DateTime?    @map("heartbeat_at") @db.Timestamptz(3)
+  lockedAt       DateTime?    @map("locked_at") @db.Timestamptz(3)
+  lockedBy       String?      @map("locked_by")
+  lastError      String?      @map("last_error")
+  correlationId  String?      @map("correlation_id")
+  createdAt      DateTime     @default(now()) @map("created_at") @db.Timestamptz(3)
+  processedAt    DateTime?    @map("processed_at") @db.Timestamptz(3)
+
+  tenant      Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  legalEntity LegalEntity? @relation(fields: [legalEntityId], references: [id], onDelete: Cascade)
+
+  @@index([status, createdAt])
+  @@index([status, leaseExpiresAt])
+  @@index([tenantId, legalEntityId])
+  @@map("outbox_event")
+}
+
+model BackgroundJob {
+  id             String    @id @default(cuid())
+  tenantId       String?   @map("tenant_id")
+  legalEntityId  String?   @map("legal_entity_id")
+  jobType        String    @map("job_type")
+  payload        Json
+  status         JobStatus @default(PENDING)
+  attempts       Int       @default(0)
+  maxAttempts    Int       @default(5) @map("max_attempts")
+  runAt          DateTime  @default(now()) @map("run_at") @db.Timestamptz(3)
+  // F-19 (Phase 1B.1): durable lease fields. `lockedAt`/`lockedBy` are the
+  // lease's acquired-at/owner (names kept for migration continuity — see
+  // queue.ts's doc comment). `leaseExpiresAt` bounds how long a claim is
+  // honoured before a reaper may reclaim it (crash recovery); `heartbeatAt`
+  // lets a genuinely still-running handler extend its own lease for
+  // long-running work without losing ownership.
+  leaseExpiresAt DateTime? @map("lease_expires_at") @db.Timestamptz(3)
+  heartbeatAt    DateTime? @map("heartbeat_at") @db.Timestamptz(3)
+  lockedAt       DateTime? @map("locked_at") @db.Timestamptz(3)
+  lockedBy       String?   @map("locked_by")
+  lastError      String?   @map("last_error")
+  correlationId  String?   @map("correlation_id")
+  idempotencyKey String?   @unique @map("idempotency_key")
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt      DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@index([status, runAt])
+  @@index([status, leaseExpiresAt])
+  @@index([tenantId, legalEntityId])
+  // P1E-4 (Phase 1F): supports the worker's terminal-job (SUCCEEDED/DEAD)
+  // retention sweep (apps/web/lib/retentionMaintenance.ts).
+  @@index([status, updatedAt])
+  @@map("background_job")
+}
+
+model Notification {
+  id              String              @id @default(cuid())
+  tenantId        String              @map("tenant_id")
+  legalEntityId   String?             @map("legal_entity_id")
+  recipientUserId String              @map("recipient_user_id")
+  channel         NotificationChannel @default(IN_APP)
+  type            String
+  title           String
+  body            String
+  readAt          DateTime?           @map("read_at") @db.Timestamptz(3)
+  createdAt       DateTime            @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  tenant      Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  legalEntity LegalEntity? @relation(fields: [legalEntityId], references: [id], onDelete: Cascade)
+  recipient   User         @relation(fields: [recipientUserId], references: [id], onDelete: Cascade)
+
+  @@index([recipientUserId, readAt])
+  @@index([tenantId, legalEntityId])
+  @@map("notification")
+}
+
+model NotificationPreference {
+  id       String              @id @default(cuid())
+  tenantId String              @map("tenant_id")
+  userId   String              @map("user_id")
+  channel  NotificationChannel
+  type     String
+  enabled  Boolean             @default(true)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, userId, channel, type])
+  @@map("notification_preference")
+}
+
+// ---------------------------------------------------------------------------
+// Files & attachments
+// ---------------------------------------------------------------------------
+
+model FileObject {
+  id               String     @id @default(cuid())
+  tenantId         String     @map("tenant_id")
+  legalEntityId    String?    @map("legal_entity_id")
+  storageKey       String     @unique @map("storage_key")
+  originalFilename String     @map("original_filename")
+  mimeType         String     @map("mime_type")
+  sizeBytes        Int        @map("size_bytes")
+  sha256           String
+  uploadedByUserId String     @map("uploaded_by_user_id")
+  status           FileStatus @default(ACTIVE)
+  // F-15 (Phase 1B.1): bumped on every content replacement — a signed URL's
+  // signature covers this value, so ANY replacement immediately invalidates
+  // every previously-issued URL for this file, not just ones issued before
+  // a status change.
+  version          Int        @default(1)
+  // Explicit revocation independent of status — lets an operator invalidate
+  // outstanding signed URLs (e.g. suspected leak) without soft-deleting or
+  // quarantining the file itself. NULL = not explicitly revoked.
+  revokedAt        DateTime?  @map("revoked_at") @db.Timestamptz(3)
+  createdAt        DateTime   @default(now()) @map("created_at") @db.Timestamptz(3)
+  deletedAt        DateTime?  @map("deleted_at") @db.Timestamptz(3)
+  // P1E-4 (Phase 1F): set by the worker's storage-purge retention sweep
+  // (apps/web/lib/retentionMaintenance.ts's purgeDeletedFileObjectStorage)
+  // once the PHYSICAL storage object has been removed — the file_object
+  // row itself is never deleted by that sweep. Without this marker, the
+  // sweep's own eligibility query (status=DELETED, deletedAt < cutoff)
+  // would keep matching the same already-purged row forever, silently
+  // re-attempting a no-op delete every cycle rather than actually skipping
+  // it — caught by this feature's own idempotency test.
+  storagePurgedAt  DateTime?  @map("storage_purged_at") @db.Timestamptz(3)
+
+  tenant      Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  legalEntity LegalEntity? @relation(fields: [legalEntityId], references: [id], onDelete: Cascade)
+  uploadedBy  User         @relation(fields: [uploadedByUserId], references: [id], onDelete: Restrict)
+  attachments Attachment[]
+
+  @@index([tenantId, legalEntityId])
+  // P1E-4 (Phase 1F): supports the worker's deleted-file storage-purge
+  // sweep (apps/web/lib/retentionMaintenance.ts) — only the physical
+  // storage object is removed by that sweep, never this row.
+  @@index([status, deletedAt, storagePurgedAt])
+  @@map("file_object")
+}
+
+model Attachment {
+  id              String   @id @default(cuid())
+  tenantId        String   @map("tenant_id")
+  fileObjectId    String   @map("file_object_id")
+  ownerEntityType String   @map("owner_entity_type")
+  ownerEntityId   String   @map("owner_entity_id")
+  createdByUserId String   @map("created_by_user_id")
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  tenant     Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  fileObject FileObject @relation(fields: [fileObjectId], references: [id], onDelete: Cascade)
+  createdBy  User       @relation(fields: [createdByUserId], references: [id], onDelete: Restrict)
+
+  @@index([ownerEntityType, ownerEntityId])
+  @@index([tenantId])
+  @@map("attachment")
+}
+
+// ---------------------------------------------------------------------------
+// Custom fields (foundation only — no business entities to attach to yet)
+// ---------------------------------------------------------------------------
+
+model CustomFieldDefinition {
+  id            String              @id @default(cuid())
+  tenantId      String              @map("tenant_id")
+  legalEntityId String?             @map("legal_entity_id")
+  entityType    String              @map("entity_type")
+  key           String
+  label         String
+  dataType      CustomFieldDataType @map("data_type")
+  isRequired    Boolean             @default(false) @map("is_required")
+  options       Json?
+  createdAt     DateTime            @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt     DateTime            @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  tenant      Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  legalEntity LegalEntity?       @relation(fields: [legalEntityId], references: [id], onDelete: Cascade)
+  values      CustomFieldValue[]
+
+  @@unique([tenantId, entityType, key])
+  @@map("custom_field_definition")
+}
+
+model CustomFieldValue {
+  id           String   @id @default(cuid())
+  tenantId     String   @map("tenant_id")
+  definitionId String   @map("definition_id")
+  entityType   String   @map("entity_type")
+  entityId     String   @map("entity_id")
+  value        Json
+  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  tenant     Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  definition CustomFieldDefinition @relation(fields: [definitionId], references: [id], onDelete: Cascade)
+
+  @@unique([definitionId, entityId])
+  @@index([tenantId])
+  @@map("custom_field_value")
+}
+
+// ---------------------------------------------------------------------------
+// API idempotency
+// ---------------------------------------------------------------------------
+
+model IdempotencyKey {
+  id             String   @id @default(cuid())
+  tenantId       String   @map("tenant_id")
+  key            String
+  requestHash    String   @map("request_hash")
+  responseStatus Int?     @map("response_status")
+  responseBody   Json?    @map("response_body")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, key])
+  @@map("idempotency_key")
+}
