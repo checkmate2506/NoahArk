@@ -28,7 +28,6 @@ export const TENANT_SCOPED_MODELS: ReadonlySet<string> = new Set([
   "ApprovalStep",
   "ApprovalDecision",
   "Attachment",
-  "CustomFieldValue",
   "NotificationPreference",
   "MembershipRole",
   "TenantMembership",
@@ -36,6 +35,20 @@ export const TENANT_SCOPED_MODELS: ReadonlySet<string> = new Set([
   "FieldPolicy",
   "AuditEvent",
   "MembershipInvitation",
+  // Phase 2A - tenant-owned shared masters and reference data.
+  // Party/CatalogItem/PriceList carry `owner_legal_entity_id` for mutation
+  // ownership (ADR-73) but remain in this partition: they are still
+  // tenant-level shared masters. Visibility is owner-OR-assignment, not
+  // dual-axis restriction to a single legal entity, so they are not
+  // LEGAL_ENTITY_REQUIRED. CatalogCategory and UnitOfMeasure have no owner
+  // column; they stay tenant-visible reference data.
+  "Party",
+  "PartyContact",
+  "PartyAddress",
+  "CatalogCategory",
+  "UnitOfMeasure",
+  "CatalogItem",
+  "PriceList",
 ]);
 
 /** Requires tenant context AND a non-null legal_entity_id on every row —
@@ -52,6 +65,14 @@ export const LEGAL_ENTITY_REQUIRED_MODELS: ReadonlySet<string> = new Set([
   "Branch",
   "Warehouse",
   "CostCentre",
+  // Phase 2A - entity-scoped assignments and roles. Every row carries a
+  // non-null legal_entity_id and is protected by the dual-axis policy.
+  "PartyLegalEntityAssignment",
+  "CustomerRole",
+  "VendorRole",
+  "CatalogItemLegalEntityAssignment",
+  "PriceListLegalEntityAssignment",
+  "PriceListEntry",
 ]);
 
 /** Requires tenant context; legal_entity_id is NULLABLE (a null value
@@ -70,6 +91,11 @@ export const LEGAL_ENTITY_NULLABLE_MODELS: ReadonlySet<string> = new Set([
   "Notification",
   "FileObject",
   "CustomFieldDefinition",
+  // Phase 2A: CustomFieldValue gained a NULLABLE legal_entity_id (mandatory
+  // for Phase 2 target types, NULL for legacy foundation rows), so it moves
+  // from the tenant-only partition into the nullable-entity partition to
+  // match its upgraded dual-axis RLS policy.
+  "CustomFieldValue",
 ]);
 
 export const LEGAL_ENTITY_SCOPED_MODELS: ReadonlySet<string> = new Set([

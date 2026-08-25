@@ -108,9 +108,56 @@ enum NotificationChannel {
 
 enum CustomFieldDataType {
   STRING
+  /// DEPRECATED (Phase 2A): ambiguous — a JS `number` is IEEE-754 binary
+  /// floating point, which must never represent a monetary value (ADR-71).
+  /// Retained ONLY so pre-existing rows written under the Phase 1 foundation
+  /// mechanism remain valid; Phase 2 typed values must use INTEGER or
+  /// DECIMAL instead, enforced by `custom_field_value_phase2_typed_check`.
   NUMBER
   BOOLEAN
   DATE
+  /// Phase 2A additions. MULTI_SELECT is deliberately excluded — no
+  /// requirement demonstrated, and it would force either an array column or
+  /// a join table (Prompt 0R decision V-11).
+  INTEGER
+  DECIMAL
+  SINGLE_SELECT
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2 — shared parties & catalog enums
+// ---------------------------------------------------------------------------
+
+enum PartyType {
+  ORGANISATION
+  INDIVIDUAL
+}
+
+enum PartyAddressType {
+  BILLING
+  SHIPPING
+  REGISTERED
+  GENERAL
+}
+
+/// Shared lifecycle for tenant-level masters and per-legal-entity
+/// assignments/roles. There is deliberately no DELETED member — Phase 2
+/// introduces no hard-delete path (no DELETE grant is issued to
+/// `noahark_app` on any Phase 2 business table).
+enum PartyStatus {
+  ACTIVE
+  ARCHIVED
+}
+
+enum AssignmentStatus {
+  ACTIVE
+  SUSPENDED
+  ARCHIVED
+}
+
+enum CatalogItemType {
+  PRODUCT
+  SERVICE
 }
 
 // ---------------------------------------------------------------------------
@@ -125,36 +172,50 @@ model Tenant {
   createdAt DateTime     @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt DateTime     @updatedAt @map("updated_at") @db.Timestamptz(3)
 
-  entitlements         TenantEntitlement[]
-  settings             TenantSetting[]
-  legalEntities        LegalEntity[]
-  memberships          TenantMembership[]
-  legalEntityMembers   LegalEntityMembership[]
-  businessUnits        BusinessUnit[]
-  departments          Department[]
-  teams                Team[]
-  branches             Branch[]
-  warehouses           Warehouse[]
-  costCentres          CostCentre[]
-  roles                Role[]
-  rolePermissions      RolePermission[]
-  membershipRoles      MembershipRole[]
-  fieldPolicies        FieldPolicy[]
-  approvalPolicies     ApprovalPolicy[]
-  approvalSteps        ApprovalStep[]
-  approvalRequests     ApprovalRequest[]
-  approvalDecisions    ApprovalDecision[]
-  auditEvents          AuditEvent[]
-  outboxEvents         OutboxEvent[]
-  notifications        Notification[]
-  notificationPrefs    NotificationPreference[]
-  fileObjects          FileObject[]
-  attachments          Attachment[]
-  customFieldDefs      CustomFieldDefinition[]
-  customFieldValues    CustomFieldValue[]
-  idempotencyKeys      IdempotencyKey[]
-  demoApprovalSubjects DemoApprovalSubject[]
-  invitations          MembershipInvitation[]
+  entitlements           TenantEntitlement[]
+  settings               TenantSetting[]
+  legalEntities          LegalEntity[]
+  memberships            TenantMembership[]
+  legalEntityMembers     LegalEntityMembership[]
+  businessUnits          BusinessUnit[]
+  departments            Department[]
+  teams                  Team[]
+  branches               Branch[]
+  warehouses             Warehouse[]
+  costCentres            CostCentre[]
+  roles                  Role[]
+  rolePermissions        RolePermission[]
+  membershipRoles        MembershipRole[]
+  fieldPolicies          FieldPolicy[]
+  approvalPolicies       ApprovalPolicy[]
+  approvalSteps          ApprovalStep[]
+  approvalRequests       ApprovalRequest[]
+  approvalDecisions      ApprovalDecision[]
+  auditEvents            AuditEvent[]
+  outboxEvents           OutboxEvent[]
+  notifications          Notification[]
+  notificationPrefs      NotificationPreference[]
+  fileObjects            FileObject[]
+  attachments            Attachment[]
+  customFieldDefs        CustomFieldDefinition[]
+  customFieldValues      CustomFieldValue[]
+  idempotencyKeys        IdempotencyKey[]
+  demoApprovalSubjects   DemoApprovalSubject[]
+  invitations            MembershipInvitation[]
+  // Phase 2 — shared parties & catalog
+  parties                Party[]
+  partyContacts          PartyContact[]
+  partyAddresses         PartyAddress[]
+  partyAssignments       PartyLegalEntityAssignment[]
+  customerRoles          CustomerRole[]
+  vendorRoles            VendorRole[]
+  catalogCategories      CatalogCategory[]
+  unitsOfMeasure         UnitOfMeasure[]
+  catalogItems           CatalogItem[]
+  catalogItemAssignments CatalogItemLegalEntityAssignment[]
+  priceLists             PriceList[]
+  priceListAssignments   PriceListLegalEntityAssignment[]
+  priceListEntries       PriceListEntry[]
 
   @@map("tenant")
 }
@@ -208,25 +269,45 @@ model LegalEntity {
   createdAt            DateTime          @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt            DateTime          @updatedAt @map("updated_at") @db.Timestamptz(3)
 
-  tenant               Tenant                  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  settings             LegalEntitySetting[]
-  legalEntityMembers   LegalEntityMembership[]
-  businessUnits        BusinessUnit[]
-  departments          Department[]
-  teams                Team[]
-  branches             Branch[]
-  warehouses           Warehouse[]
-  costCentres          CostCentre[]
-  membershipRoles      MembershipRole[]
-  approvalPolicies     ApprovalPolicy[]
-  approvalRequests     ApprovalRequest[]
-  auditEvents          AuditEvent[]
-  outboxEvents         OutboxEvent[]
-  notifications        Notification[]
-  fileObjects          FileObject[]
-  customFieldDefs      CustomFieldDefinition[]
-  demoApprovalSubjects DemoApprovalSubject[]
+  tenant                 Tenant                             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  settings               LegalEntitySetting[]
+  legalEntityMembers     LegalEntityMembership[]
+  businessUnits          BusinessUnit[]
+  departments            Department[]
+  teams                  Team[]
+  branches               Branch[]
+  warehouses             Warehouse[]
+  costCentres            CostCentre[]
+  membershipRoles        MembershipRole[]
+  approvalPolicies       ApprovalPolicy[]
+  approvalRequests       ApprovalRequest[]
+  auditEvents            AuditEvent[]
+  outboxEvents           OutboxEvent[]
+  notifications          Notification[]
+  fileObjects            FileObject[]
+  customFieldDefs        CustomFieldDefinition[]
+  customFieldValues      CustomFieldValue[]
+  demoApprovalSubjects   DemoApprovalSubject[]
+  // Phase 2 — shared parties & catalog
+  partyAssignments       PartyLegalEntityAssignment[]
+  customerRoles          CustomerRole[]
+  vendorRoles            VendorRole[]
+  catalogItemAssignments CatalogItemLegalEntityAssignment[]
+  priceListAssignments   PriceListLegalEntityAssignment[]
+  priceListEntries       PriceListEntry[]
+  // Phase 2A audit remediation (ADR-73): managing legal entity for shared
+  // masters. Assignments remain the extra read-visibility grant; this
+  // relation is mutation ownership. ON DELETE NO ACTION so a standalone
+  // legal-entity DELETE is rejected while it owns masters, without racing
+  // tenant-level CASCADE used by test-fixture teardown. Deactivating an
+  // owner (status) never deletes the master.
+  ownedParties           Party[]                            @relation("PartyOwner")
+  ownedCatalogItems      CatalogItem[]                      @relation("CatalogItemOwner")
+  ownedPriceLists        PriceList[]                        @relation("PriceListOwner")
 
+  // Phase 2A: referenced target for the composite foreign keys that make a
+  // cross-tenant legal-entity reference structurally impossible.
+  @@unique([id, tenantId])
   @@index([tenantId])
   @@map("legal_entity")
 }
@@ -1089,19 +1170,34 @@ model Attachment {
 }
 
 // ---------------------------------------------------------------------------
-// Custom fields (foundation only — no business entities to attach to yet)
+// Custom fields
+//
+// Phase 2 attaches these tables to real business masters, so entityType is
+// a fail-closed ALLOWLIST (ADR-73) rather than the Phase 2A denylist that
+// independent audit F-3 showed was bypassable by whitespace and unenumerated
+// auth-adjacent names. Canonical values are lowercase snake_case exact
+// matches; leading/trailing whitespace and case/plural variants are
+// rejected. demo_approval_subject is retained as the only legitimate
+// legacy target and is NOT referentially enforced.
 // ---------------------------------------------------------------------------
 
 model CustomFieldDefinition {
   id            String              @id @default(cuid())
   tenantId      String              @map("tenant_id")
   legalEntityId String?             @map("legal_entity_id")
+  /// Canonical allowlisted target (trimmed, exact case). Immutable once
+  /// values exist — see `custom_field_definition_immutability_trg`.
   entityType    String              @map("entity_type")
   key           String
   label         String
+  /// Immutable once values exist (same trigger as entityType).
   dataType      CustomFieldDataType @map("data_type")
   isRequired    Boolean             @default(false) @map("is_required")
   options       Json?
+  // Phase 2A additions.
+  isActive      Boolean             @default(true) @map("is_active")
+  displayOrder  Int                 @default(0) @map("display_order")
+  version       Int                 @default(1)
   createdAt     DateTime            @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt     DateTime            @updatedAt @map("updated_at") @db.Timestamptz(3)
 
@@ -1110,23 +1206,61 @@ model CustomFieldDefinition {
   values      CustomFieldValue[]
 
   @@unique([tenantId, entityType, key])
+  @@unique([id, tenantId])
   @@map("custom_field_definition")
 }
 
+/// Phase 2A (expand step of expand/migrate/contract). The Phase 1 foundation
+/// stored every value in the untyped `value Json` column. JSON numbers
+/// deserialize as IEEE-754 doubles in every mainstream parser, which is
+/// incompatible with the exact-decimal contract (ADR-71) — so Phase 2 values
+/// use TYPED columns instead, with database-enforced agreement between the
+/// populated column and the definition's `dataType`.
+///
+/// `value` is retained and merely relaxed to NULLable so pre-existing
+/// foundation rows keep working untouched. It is NOT dropped in Phase 2; the
+/// contract step (dropping `value` once no legacy row remains) is deferred to
+/// a later phase. New Phase 2 writes are barred from `value` by
+/// `custom_field_value_phase2_typed_check`.
+///
+/// Polymorphic `(entity_type, entity_id)` integrity is database-enforced by
+/// `custom_field_value_target_integrity_trg` (ADR-73 / independent audit F-6):
+/// an explicit CASE over the allowlist proves the target exists, has the
+/// stated type, and belongs to the same tenant and stated legal entity.
+/// There is no dynamic SQL on untrusted entityType.
 model CustomFieldValue {
-  id           String   @id @default(cuid())
-  tenantId     String   @map("tenant_id")
-  definitionId String   @map("definition_id")
-  entityType   String   @map("entity_type")
-  entityId     String   @map("entity_id")
-  value        Json
-  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+  id            String    @id @default(cuid())
+  tenantId      String    @map("tenant_id")
+  /// Mandatory for every Phase 2 target type (enforced by
+  /// `custom_field_value_phase2_typed_check`), so values inherit dual-axis
+  /// RLS instead of the Phase 1 tenant-only policy. NULL only for the
+  /// legacy `demo_approval_subject` target.
+  legalEntityId String?   @map("legal_entity_id")
+  definitionId  String    @map("definition_id")
+  /// Must equal the definition's entityType and the allowlist exactly.
+  entityType    String    @map("entity_type")
+  entityId      String    @map("entity_id")
+  /// Legacy Phase 1 untyped storage — retained, never written by Phase 2.
+  value         Json?
+  // Phase 2A typed storage. Exactly one is populated for a Phase 2 row, and
+  // it must match the definition's dataType — both database-enforced.
+  valueText     String?   @map("value_text")
+  valueInteger  Int?      @map("value_integer")
+  valueDecimal  Decimal?  @map("value_decimal") @db.Decimal(23, 6)
+  valueBoolean  Boolean?  @map("value_boolean")
+  valueDate     DateTime? @map("value_date") @db.Date
+  valueOption   String?   @map("value_option")
+  version       Int       @default(1)
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt     DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
 
-  tenant     Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  definition CustomFieldDefinition @relation(fields: [definitionId], references: [id], onDelete: Cascade)
+  tenant      Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  legalEntity LegalEntity?          @relation(fields: [legalEntityId], references: [id], onDelete: Cascade)
+  definition  CustomFieldDefinition @relation(fields: [definitionId], references: [id], onDelete: Cascade)
 
   @@unique([definitionId, entityId])
   @@index([tenantId])
+  @@index([entityType, entityId])
   @@map("custom_field_value")
 }
 
@@ -1147,4 +1281,421 @@ model IdempotencyKey {
 
   @@unique([tenantId, key])
   @@map("idempotency_key")
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2 - Shared parties (CRM / Purchasing counterparties)
+//
+// One tenant-owned Party master; "customer" and "vendor" are LEGAL-ENTITY
+// roles hung off an explicit assignment, never separate masters (ADR-71).
+// That is what lets a single organisation be both a customer of the SG entity
+// and a vendor of the MY entity without duplicating its identity, while
+// keeping every commercial term legally separated per entity
+// (LEGAL_ENTITY_ARCHITECTURE.md sections 3 and 4).
+//
+// The master remains tenant-level. `ownerLegalEntityId` (ADR-73) is the
+// managing legal entity that may INSERT/UPDATE shared fields; assignments
+// grant additional READ visibility to other entities of the same tenant.
+// An assigned non-owner cannot mutate the master. Bootstrap: the owner may
+// read the newly created master before the first assignment ("owner-visible
+// unassigned master pending atomic assignment"). P2B still creates master +
+// first assignment in one transaction.
+// ---------------------------------------------------------------------------
+
+model Party {
+  id                 String      @id @default(cuid())
+  tenantId           String      @map("tenant_id")
+  /// Managing legal entity. Composite FK with tenantId makes a cross-tenant
+  /// owner structurally impossible. Controls mutation; not dual-axis
+  /// isolation — assigned non-owners may still READ.
+  ownerLegalEntityId String      @map("owner_legal_entity_id")
+  code               String
+  partyType          PartyType   @map("party_type")
+  /// ORGANISATION: registered/legal name. INDIVIDUAL: unused (NULL).
+  legalName          String?     @map("legal_name")
+  tradingName        String?     @map("trading_name")
+  /// INDIVIDUAL: given/family name. ORGANISATION: unused (NULL).
+  givenName          String?     @map("given_name")
+  familyName         String?     @map("family_name")
+  /// Lower-cased, whitespace-collapsed display name. Duplicate DETECTION
+  /// support only - indexed, never unique, and never used to auto-merge.
+  normalisedName     String      @map("normalised_name")
+  /// Counterparty tax/registration identifier. Deliberately opaque with no
+  /// format validation - every SG/MY/ID identifier format is still
+  /// RESEARCH REQUIRED in the country requirement documents, matching
+  /// LegalEntity.registeredIdentifier's own treatment.
+  taxIdentifier      String?     @map("tax_identifier")
+  status             PartyStatus @default(ACTIVE)
+  archivedAt         DateTime?   @map("archived_at") @db.Timestamptz(3)
+  version            Int         @default(1)
+  createdAt          DateTime    @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt          DateTime    @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  tenant           Tenant                       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  ownerLegalEntity LegalEntity                  @relation("PartyOwner", fields: [ownerLegalEntityId, tenantId], references: [id, tenantId], onDelete: NoAction)
+  contacts         PartyContact[]
+  addresses        PartyAddress[]
+  assignments      PartyLegalEntityAssignment[]
+
+  @@unique([tenantId, code])
+  @@unique([id, tenantId])
+  @@index([tenantId, status])
+  @@index([tenantId, normalisedName])
+  @@index([tenantId, taxIdentifier])
+  @@index([tenantId, ownerLegalEntityId])
+  @@map("party")
+}
+
+/// An EXTERNAL business contact at a counterparty. This is not, and must never
+/// become, an authentication identity: it has no credential, session or
+/// account relation, and its email is deliberately not unique against
+/// User.email. See PHASE_02_IMPLEMENTATION.md's identity-boundary table.
+model PartyContact {
+  id              String      @id @default(cuid())
+  tenantId        String      @map("tenant_id")
+  partyId         String      @map("party_id")
+  givenName       String      @map("given_name")
+  familyName      String?     @map("family_name")
+  jobTitle        String?     @map("job_title")
+  email           String?
+  phone           String?
+  isPrimary       Boolean     @default(false) @map("is_primary")
+  /// Lower-cased email for duplicate detection only.
+  normalisedEmail String?     @map("normalised_email")
+  status          PartyStatus @default(ACTIVE)
+  archivedAt      DateTime?   @map("archived_at") @db.Timestamptz(3)
+  version         Int         @default(1)
+  createdAt       DateTime    @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt       DateTime    @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  party  Party  @relation(fields: [partyId, tenantId], references: [id, tenantId], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([partyId])
+  @@index([tenantId, normalisedEmail])
+  @@map("party_contact")
+}
+
+/// Descriptive postal address. `countryCode` is an ISO 3166-1 alpha-2 SHAPE
+/// only (two uppercase letters, DB-enforced) and is deliberately NOT the
+/// `Jurisdiction` enum: a NoahArk legal entity is strictly SG/MY/ID, but its
+/// counterparties may be anywhere. This column must never select a
+/// localisation, tax, payroll, holiday, language or statutory adapter -
+/// enforced by apps/web/lib/addressCountryAdapterBoundary.test.ts.
+model PartyAddress {
+  id          String           @id @default(cuid())
+  tenantId    String           @map("tenant_id")
+  partyId     String           @map("party_id")
+  addressType PartyAddressType @map("address_type")
+  line1       String
+  line2       String?
+  line3       String?
+  city        String?
+  region      String?
+  postalCode  String?          @map("postal_code")
+  countryCode String           @map("country_code") @db.Char(2)
+  status      PartyStatus      @default(ACTIVE)
+  archivedAt  DateTime?        @map("archived_at") @db.Timestamptz(3)
+  version     Int              @default(1)
+  createdAt   DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime         @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  party  Party  @relation(fields: [partyId, tenantId], references: [id, tenantId], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([partyId])
+  @@map("party_address")
+}
+
+/// The isolation boundary for shared party master data. Composite foreign
+/// keys to BOTH `party(id, tenant_id)` and `legal_entity(id, tenant_id)` make
+/// a cross-tenant assignment structurally impossible, not merely validated.
+model PartyLegalEntityAssignment {
+  id            String           @id @default(cuid())
+  tenantId      String           @map("tenant_id")
+  partyId       String           @map("party_id")
+  legalEntityId String           @map("legal_entity_id")
+  status        AssignmentStatus @default(ACTIVE)
+  assignedAt    DateTime         @default(now()) @map("assigned_at") @db.Timestamptz(3)
+  archivedAt    DateTime?        @map("archived_at") @db.Timestamptz(3)
+  version       Int              @default(1)
+  createdAt     DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt     DateTime         @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  tenant       Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  party        Party         @relation(fields: [partyId, tenantId], references: [id, tenantId], onDelete: Cascade)
+  legalEntity  LegalEntity   @relation(fields: [legalEntityId, tenantId], references: [id, tenantId], onDelete: Cascade)
+  customerRole CustomerRole?
+  vendorRole   VendorRole?
+
+  @@unique([partyId, legalEntityId])
+  @@unique([id, legalEntityId])
+  @@index([tenantId, legalEntityId])
+  @@index([partyId, legalEntityId])
+  @@map("party_legal_entity_assignment")
+}
+
+/// Customer role for ONE legal entity. Deliberately minimal: no credit limit,
+/// no payment-term reference, no tax-profile reference and no default price
+/// list - each of those implies receivables, terms calculation, tax
+/// determination or customer-specific pricing, all excluded from Phase 2.
+model CustomerRole {
+  id              String           @id @default(cuid())
+  tenantId        String           @map("tenant_id")
+  legalEntityId   String           @map("legal_entity_id")
+  assignmentId    String           @map("assignment_id")
+  code            String
+  status          AssignmentStatus @default(ACTIVE)
+  defaultCurrency Currency?        @map("default_currency")
+  archivedAt      DateTime?        @map("archived_at") @db.Timestamptz(3)
+  version         Int              @default(1)
+  createdAt       DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt       DateTime         @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  tenant      Tenant                     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  legalEntity LegalEntity                @relation(fields: [legalEntityId, tenantId], references: [id, tenantId], onDelete: Cascade)
+  assignment  PartyLegalEntityAssignment @relation(fields: [assignmentId, legalEntityId], references: [id, legalEntityId], onDelete: Cascade)
+
+  @@unique([assignmentId])
+  @@unique([assignmentId, legalEntityId])
+  @@unique([legalEntityId, code])
+  @@index([tenantId, legalEntityId])
+  @@map("customer_role")
+}
+
+/// Vendor role for ONE legal entity - symmetric with CustomerRole. A single
+/// assignment may carry BOTH roles, which is how one organisation is both a
+/// customer and a supplier of the same entity without duplication.
+model VendorRole {
+  id              String           @id @default(cuid())
+  tenantId        String           @map("tenant_id")
+  legalEntityId   String           @map("legal_entity_id")
+  assignmentId    String           @map("assignment_id")
+  code            String
+  status          AssignmentStatus @default(ACTIVE)
+  defaultCurrency Currency?        @map("default_currency")
+  archivedAt      DateTime?        @map("archived_at") @db.Timestamptz(3)
+  version         Int              @default(1)
+  createdAt       DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt       DateTime         @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  tenant      Tenant                     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  legalEntity LegalEntity                @relation(fields: [legalEntityId, tenantId], references: [id, tenantId], onDelete: Cascade)
+  assignment  PartyLegalEntityAssignment @relation(fields: [assignmentId, legalEntityId], references: [id, legalEntityId], onDelete: Cascade)
+
+  @@unique([assignmentId])
+  @@unique([assignmentId, legalEntityId])
+  @@unique([legalEntityId, code])
+  @@index([tenantId, legalEntityId])
+  @@map("vendor_role")
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2 - Catalog and pricing
+// ---------------------------------------------------------------------------
+
+/// Flat in Phase 2 (no parentId). A nullable self-reference can be added
+/// later without a destructive migration if hierarchy is ever required.
+/// Tenant-visible reference data: carries no entity-specific commercial term,
+/// so it uses the plain tenant policy rather than an assignment policy.
+model CatalogCategory {
+  id        String   @id @default(cuid())
+  tenantId  String   @map("tenant_id")
+  code      String
+  name      String
+  isActive  Boolean  @default(true) @map("is_active")
+  version   Int      @default(1)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  tenant Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  items  CatalogItem[]
+
+  @@unique([tenantId, code])
+  @@unique([id, tenantId])
+  @@map("catalog_category")
+}
+
+/// Base unit only - no conversion factors and no conversion engine in Phase 2.
+/// Tenant-visible reference data, as for categories.
+model UnitOfMeasure {
+  id        String   @id @default(cuid())
+  tenantId  String   @map("tenant_id")
+  code      String
+  name      String
+  isActive  Boolean  @default(true) @map("is_active")
+  version   Int      @default(1)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  tenant Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  items  CatalogItem[]
+
+  @@unique([tenantId, code])
+  @@unique([id, tenantId])
+  @@map("unit_of_measure")
+}
+
+/// One model for products AND services: every behavioural difference between
+/// them in this codebase - stock, costing, serial/batch, BOM - is excluded
+/// from Phase 2, so two tables would duplicate categories, UOM, assignments,
+/// pricing and custom fields for no gain.
+///
+/// Deliberately ABSENT: stock quantity, valuation, movement, isStockTracked,
+/// variants and any accounting mapping. The Phase 2 schema test asserts their
+/// continued absence.
+///
+/// `ownerLegalEntityId` is the managing legal entity (ADR-73). Assignments
+/// grant additional read visibility; they do not grant mutation of shared
+/// catalog fields.
+model CatalogItem {
+  id                 String          @id @default(cuid())
+  tenantId           String          @map("tenant_id")
+  ownerLegalEntityId String          @map("owner_legal_entity_id")
+  code               String
+  itemType           CatalogItemType @map("item_type")
+  name               String
+  description        String?
+  categoryId         String?         @map("category_id")
+  baseUomId          String          @map("base_uom_id")
+  /// INERT placeholder required by IMPLEMENTATION_ROADMAP.md's Phase 2
+  /// "Tax-mapping placeholders" country-impact note. No Phase 2 code reads
+  /// it and no tax logic may consume it - tax determination is the country
+  /// adapter's job in Phases 11-13.
+  taxCategoryCode    String?         @map("tax_category_code")
+  isSellable         Boolean         @default(true) @map("is_sellable")
+  isPurchasable      Boolean         @default(true) @map("is_purchasable")
+  status             PartyStatus     @default(ACTIVE)
+  archivedAt         DateTime?       @map("archived_at") @db.Timestamptz(3)
+  version            Int             @default(1)
+  createdAt          DateTime        @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt          DateTime        @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  tenant           Tenant                             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  ownerLegalEntity LegalEntity                        @relation("CatalogItemOwner", fields: [ownerLegalEntityId, tenantId], references: [id, tenantId], onDelete: NoAction)
+  category         CatalogCategory?                   @relation(fields: [categoryId, tenantId], references: [id, tenantId], onDelete: Restrict)
+  baseUom          UnitOfMeasure                      @relation(fields: [baseUomId, tenantId], references: [id, tenantId], onDelete: Restrict)
+  assignments      CatalogItemLegalEntityAssignment[]
+
+  @@unique([tenantId, code])
+  @@unique([id, tenantId])
+  @@index([tenantId, status])
+  @@index([tenantId, itemType])
+  @@index([tenantId, ownerLegalEntityId])
+  @@map("catalog_item")
+}
+
+model CatalogItemLegalEntityAssignment {
+  id             String           @id @default(cuid())
+  tenantId       String           @map("tenant_id")
+  catalogItemId  String           @map("catalog_item_id")
+  legalEntityId  String           @map("legal_entity_id")
+  /// Optional entity-local code; unique per legal entity when present
+  /// (partial unique index - see the Phase 2 migration).
+  entityItemCode String?          @map("entity_item_code")
+  status         AssignmentStatus @default(ACTIVE)
+  assignedAt     DateTime         @default(now()) @map("assigned_at") @db.Timestamptz(3)
+  archivedAt     DateTime?        @map("archived_at") @db.Timestamptz(3)
+  version        Int              @default(1)
+  createdAt      DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt      DateTime         @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  tenant       Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  catalogItem  CatalogItem      @relation(fields: [catalogItemId, tenantId], references: [id, tenantId], onDelete: Cascade)
+  legalEntity  LegalEntity      @relation(fields: [legalEntityId, tenantId], references: [id, tenantId], onDelete: Cascade)
+  priceEntries PriceListEntry[]
+
+  @@unique([catalogItemId, legalEntityId])
+  @@unique([id, legalEntityId])
+  @@index([tenantId, legalEntityId])
+  @@index([catalogItemId, legalEntityId])
+  @@map("catalog_item_legal_entity_assignment")
+}
+
+/// Currency is the platform `Currency` enum (SGD/MYR/IDR) - PRODUCT_SCOPE.md
+/// section 2 forbids an unrestricted currency catalogue.
+///
+/// `ownerLegalEntityId` is the managing legal entity (ADR-73). Price-list
+/// assignment rows and PriceListEntry remain governed by their own
+/// legalEntityId; they cannot be used to mutate this shared master.
+model PriceList {
+  id                 String      @id @default(cuid())
+  tenantId           String      @map("tenant_id")
+  ownerLegalEntityId String      @map("owner_legal_entity_id")
+  code               String
+  name               String
+  currency           Currency
+  status             PartyStatus @default(ACTIVE)
+  archivedAt         DateTime?   @map("archived_at") @db.Timestamptz(3)
+  version            Int         @default(1)
+  createdAt          DateTime    @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt          DateTime    @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  tenant           Tenant                           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  ownerLegalEntity LegalEntity                      @relation("PriceListOwner", fields: [ownerLegalEntityId, tenantId], references: [id, tenantId], onDelete: NoAction)
+  assignments      PriceListLegalEntityAssignment[]
+
+  @@unique([tenantId, code])
+  @@unique([id, tenantId])
+  @@index([tenantId, status])
+  @@index([tenantId, ownerLegalEntityId])
+  @@map("price_list")
+}
+
+model PriceListLegalEntityAssignment {
+  id            String           @id @default(cuid())
+  tenantId      String           @map("tenant_id")
+  priceListId   String           @map("price_list_id")
+  legalEntityId String           @map("legal_entity_id")
+  /// At most one ACTIVE default per legal entity - partial unique index.
+  isDefault     Boolean          @default(false) @map("is_default")
+  status        AssignmentStatus @default(ACTIVE)
+  assignedAt    DateTime         @default(now()) @map("assigned_at") @db.Timestamptz(3)
+  archivedAt    DateTime?        @map("archived_at") @db.Timestamptz(3)
+  version       Int              @default(1)
+  createdAt     DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt     DateTime         @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  tenant      Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  priceList   PriceList        @relation(fields: [priceListId, tenantId], references: [id, tenantId], onDelete: Cascade)
+  legalEntity LegalEntity      @relation(fields: [legalEntityId, tenantId], references: [id, tenantId], onDelete: Cascade)
+  entries     PriceListEntry[]
+
+  @@unique([priceListId, legalEntityId])
+  @@unique([id, legalEntityId])
+  @@index([tenantId, legalEntityId])
+  @@map("price_list_legal_entity_assignment")
+}
+
+/// A price is owned by exactly ONE legal entity, structurally. Both foreign
+/// keys carry `legal_entity_id` in the key itself, so a row can only ever
+/// reference a price-list assignment and a catalog-item assignment that
+/// belong to the SAME legal entity as the row - a mismatch is rejected by
+/// PostgreSQL, not by application code, and cannot be forged through raw SQL.
+model PriceListEntry {
+  id                      String    @id @default(cuid())
+  tenantId                String    @map("tenant_id")
+  legalEntityId           String    @map("legal_entity_id")
+  priceListAssignmentId   String    @map("price_list_assignment_id")
+  catalogItemAssignmentId String    @map("catalog_item_assignment_id")
+  /// Exact decimal (ADR-71). Never a float; never scientific notation at a
+  /// future API boundary; CHECK unit_price >= 0.
+  unitPrice               Decimal   @map("unit_price") @db.Decimal(23, 6)
+  /// LOCAL_CIVIL_DATE - a price effective "1 July" means 1 July everywhere.
+  effectiveFrom           DateTime  @map("effective_from") @db.Date
+  effectiveTo             DateTime? @map("effective_to") @db.Date
+  version                 Int       @default(1)
+  createdAt               DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt               DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  tenant                Tenant                           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  legalEntity           LegalEntity                      @relation(fields: [legalEntityId, tenantId], references: [id, tenantId], onDelete: Cascade)
+  priceListAssignment   PriceListLegalEntityAssignment   @relation(fields: [priceListAssignmentId, legalEntityId], references: [id, legalEntityId], onDelete: Cascade)
+  catalogItemAssignment CatalogItemLegalEntityAssignment @relation(fields: [catalogItemAssignmentId, legalEntityId], references: [id, legalEntityId], onDelete: Cascade)
+
+  @@index([tenantId, legalEntityId])
+  @@index([priceListAssignmentId, catalogItemAssignmentId])
+  @@map("price_list_entry")
 }

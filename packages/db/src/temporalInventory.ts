@@ -128,16 +128,74 @@ const ABSOLUTE_INSTANT_COLUMNS: ReadonlyArray<[table: string, column: string]> =
   ["user_credential", "updated_at"],
   ["verification_token", "expires"],
   ["warehouse", "created_at"],
+  // --- Phase 2A: shared parties & catalog -------------------------------
+  // Every one of these is a genuine event instant (when the row was written,
+  // archived, or assigned), NOT a civil date — so they stay timestamptz,
+  // unlike price effective dates below.
+  ["catalog_category", "created_at"],
+  ["catalog_category", "updated_at"],
+  ["catalog_item", "archived_at"],
+  ["catalog_item", "created_at"],
+  ["catalog_item", "updated_at"],
+  ["catalog_item_legal_entity_assignment", "archived_at"],
+  ["catalog_item_legal_entity_assignment", "assigned_at"],
+  ["catalog_item_legal_entity_assignment", "created_at"],
+  ["catalog_item_legal_entity_assignment", "updated_at"],
+  ["custom_field_value", "created_at"],
+  ["customer_role", "archived_at"],
+  ["customer_role", "created_at"],
+  ["customer_role", "updated_at"],
+  ["party", "archived_at"],
+  ["party", "created_at"],
+  ["party", "updated_at"],
+  ["party_address", "archived_at"],
+  ["party_address", "created_at"],
+  ["party_address", "updated_at"],
+  ["party_contact", "archived_at"],
+  ["party_contact", "created_at"],
+  ["party_contact", "updated_at"],
+  ["party_legal_entity_assignment", "archived_at"],
+  ["party_legal_entity_assignment", "assigned_at"],
+  ["party_legal_entity_assignment", "created_at"],
+  ["party_legal_entity_assignment", "updated_at"],
+  ["price_list", "archived_at"],
+  ["price_list", "created_at"],
+  ["price_list", "updated_at"],
+  ["price_list_entry", "created_at"],
+  ["price_list_entry", "updated_at"],
+  ["price_list_legal_entity_assignment", "archived_at"],
+  ["price_list_legal_entity_assignment", "assigned_at"],
+  ["price_list_legal_entity_assignment", "created_at"],
+  ["price_list_legal_entity_assignment", "updated_at"],
+  ["unit_of_measure", "created_at"],
+  ["unit_of_measure", "updated_at"],
+  ["vendor_role", "archived_at"],
+  ["vendor_role", "created_at"],
+  ["vendor_role", "updated_at"],
 ];
 
 /**
- * No LOCAL_CIVIL_DATE / LOCAL_CIVIL_TIME / REPORTING_PERIOD / DURATION
- * columns exist in the Phase 1 schema — see this file's own module doc
- * comment. Kept as an explicit, empty, typed list (rather than omitted)
- * so a future phase adding one has an obvious, already-wired place to
- * register it and extend the conformance test's coverage.
+ * Phase 2A introduces this codebase's FIRST non-instant temporal columns.
+ *
+ * A price effective from "1 July" must mean 1 July for every reader,
+ * everywhere. Stored as `timestamptz` it would not: a value written at
+ * 00:00 Asia/Jakarta (UTC+7) reads as 30 June at UTC, so a price lookup run
+ * from a different session timezone could select the WRONG price on a
+ * boundary day. PostgreSQL `date` carries no zone and therefore cannot
+ * drift — which is exactly the property a civil effective date needs.
+ *
+ * The same reasoning applies to a user-entered custom DATE field: it is a
+ * calendar fact ("contract signed on 3 March"), not an instant.
+ *
+ * `temporalSchemaConformance.test.ts` asserts these map to `date` and FAILS
+ * if any of them is ever silently changed to `timestamp`/`timestamptz` —
+ * which is precisely what Prisma would produce if `@db.Date` were dropped.
  */
-const LOCAL_CIVIL_DATE_COLUMNS: ReadonlyArray<[table: string, column: string]> = [];
+const LOCAL_CIVIL_DATE_COLUMNS: ReadonlyArray<[table: string, column: string]> = [
+  ["custom_field_value", "value_date"],
+  ["price_list_entry", "effective_from"],
+  ["price_list_entry", "effective_to"],
+];
 
 export const TEMPORAL_INVENTORY: readonly TemporalColumn[] = [
   ...ABSOLUTE_INSTANT_COLUMNS.map(([table, column]) => ({
