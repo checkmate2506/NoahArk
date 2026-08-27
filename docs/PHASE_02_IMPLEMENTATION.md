@@ -1,12 +1,15 @@
 # NoahArk — Phase 2 Implementation Record (Shared Parties & Catalog)
 
-> Status: **P2A open — independent Sonnet audit FAIL remediated (ADR-73), uncommitted.**
-> P2B–P2F not started. Phase 2 is "Shared Parties & Catalog" per `IMPLEMENTATION_ROADMAP.md` §2.
-> **Accounting remains Phase 4.**
+> Status: **P2B implemented, uncommitted.** Independent Sonnet P2B audit:
+> **PASS** (no HIGH/MEDIUM). Two confirmed LOW findings and one plausible
+> LOW/informational finding were remediated or investigated in this working
+> tree (see §16). P2A schema/RLS/migrations remain authoritative. P2C–P2E have
+> **not** started. Phase 2 is "Shared Parties & Catalog" per
+> `IMPLEMENTATION_ROADMAP.md` §2. **Accounting remains Phase 4.**
 
 Independent Sonnet auditing of the first P2A landing returned **FAIL / not P2B-ready**.
-The defects (F-1 through F-6) are recorded in ADR-73 and closed in this working
-tree. They are not concealed.
+The defects (F-1 through F-6) are recorded in ADR-73 and closed in the committed
+P2A tree. They are not concealed.
 
 ## 1. P2A objective
 
@@ -264,4 +267,146 @@ edited and no Phase 1 security control was weakened.
 | F-5 | LOW      | Identifier-based monetary scan                | Documented as defense in depth; aliases expanded |
 | F-6 | HIGH     | Polymorphic custom-field target unenforced    | Target-integrity trigger + tests                 |
 
-P2B has **not** started.
+P2B domain services are implemented in this working tree (see §16). P2C–P2E have
+**not** started.
+
+## 16. P2B — party domain services
+
+P2A schema, migrations 00003–00004, ownership RLS and target-integrity controls
+are unchanged. P2B adds no migration.
+
+### Services and package ownership (ADR-74)
+
+| Service                                                                                                    | Package                                | Notes                                                   |
+| ---------------------------------------------------------------------------------------------------------- | -------------------------------------- | ------------------------------------------------------- |
+| Party, including atomic bootstrap, list/get/update/archive, ownership transfer, duplicate-candidate lookup | `@noahark/crm`                         | Shared master                                           |
+| PartyContact, PartyAddress                                                                                 | `@noahark/crm`                         | Mutation follows Party owner                            |
+| PartyLegalEntityAssignment                                                                                 | `@noahark/crm`                         | Entity-scoped; last ACTIVE assignment cannot be revoked |
+| CustomerRole                                                                                               | `@noahark/crm`                         | One per assignment                                      |
+| VendorRole                                                                                                 | `@noahark/purchasing`                  | One per assignment; identity remains the shared Party   |
+| Thin re-export                                                                                             | `apps/web/lib/services/partyDomain.ts` | For later P2D routes                                    |
+
+Purchasing does not duplicate Party logic; it imports assignment/context/audit helpers from CRM.
+
+### Trusted context
+
+Every operation takes server-derived `AccessContext`. Tenant id, legal-entity
+set, actor and permissions are never taken from the request body. Business
+writes run inside `withTenantContext` on the RLS-enforced `noahark_app` client.
+Empty legal-entity scope fails closed. P2D must add `party:*` permission
+catalogue entries and call `authorize()` on API routes — P2B does not seed
+permissions.
+
+### Atomic bootstrap
+
+`createParty` inserts Party (owner = proposed legal entity) and the first
+`PartyLegalEntityAssignment` for that same entity in one transaction, then
+optional customer/vendor roles, then audit events. Assignment or role failure
+rolls the Party back. The public service never returns an unassigned Party.
+
+### Ownership and transfer
+
+`ownerLegalEntityId` remains the mutation gate (ADR-73). Assigned non-owners
+may read. `transferPartyOwnership` reads the locked current owner, requires
+both old and new owners in trusted context, is version-gated, and writes
+`party.ownership_transferred` with old/new owner ids only. It does not create,
+revoke or modify assignments.
+
+### At-least-one-assignment
+
+Enforced in the service under `pg_advisory_xact_lock` + `SELECT … FOR UPDATE`
+on the party. Revoking or suspending the last ACTIVE assignment is a
+`CONFLICT`. Concurrent revokes cannot leave zero ACTIVE rows. No hard delete.
+
+### Customer / vendor dual role
+
+Both roles may exist on the same assignment with independent codes, unique per
+legal entity. Role updates never write Party master fields. Cross-entity
+assignment-id substitution returns `NOT_FOUND`.
+
+### Masking boundary
+
+Email and phone use Phase 1 `maskProtectedFields` with declared keys
+`party_contact:email:read` and `party_contact:phone:read`. Those keys are **not**
+in the Phase 1 catalogue (P2D work). Until seeded, every production role lacks
+them, so reads are fail-closed (values replaced with `null`). Duplicate
+candidates never include email, phone, assignments, roles or entity-specific
+codes. P2D must: add the keys to `PERMISSIONS` / `PERMISSION_CATALOG` /
+system roles as product policy requires; optionally persist `FieldPolicy` rows;
+audit sensitive unmasked reads if the API layer requires it.
+
+### Audit events
+
+Hash-chained `writeAuditEvent` in `@noahark/crm` mirrors the Phase 1 writer
+(advisory lock + sequence). Actions: `party.created/updated/archived`,
+`party.ownership_transferred`, contact/address created/updated/archived,
+assignment created/updated/revoked, customer_role and vendor_role
+created/updated/archived. Metadata omits email/phone and secrets.
+
+### Exclusions
+
+No catalog, pricing, custom-field services, permissions, API routes, OpenAPI,
+UI, import/export, attachments, CRM pipeline, quotations/orders, purchasing
+documents, accounting, inventory, tax adapters, e-invoicing, payroll, workers,
+or schema/migration/RLS changes. CountryCode on addresses remains descriptive
+shape only.
+
+### Tests
+
+Exact counts from this working tree (post low-finding remediation):
+
+| Suite                                                                   | Result                                                                                        |
+| ----------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| `@noahark/crm` unit                                                     | **6/6** (includes locale-pinned duplicate ordering)                                           |
+| `@noahark/authz` unit (includes fail-closed pending field key)          | 20/20                                                                                         |
+| `@noahark/web` unit                                                     | 64/64                                                                                         |
+| P2B integration (`partyDomain*.test.ts`, 9 files)                       | **34/34** (original 31, plus 2 archive-create lock races and 1 Prisma unique-violation shape) |
+| P2A integration (schema/RLS/ownership/custom-field/attachment/temporal) | **60/60** (6 files; independently verified P2A database/integration subset; not weakened)     |
+| Full integration (web + workspace packages)                             | **474/474** (55 files) on PostgreSQL **18.4**                                                 |
+
+Original P2B implementation first run was 28/31 (assigned non-owner `SELECT FOR UPDATE`
+mapped to NOT_FOUND; fixed to SELECT-then-Forbidden). This remediation's L-3 shape
+probe first asserted `meta.target` as present; the live adapter result was
+`target` absent (`undefined`). Production mapping was not changed.
+
+The first L-2 concurrency-test execution passed its 8/8 assertions, but Vitest
+nevertheless reported two unhandled `VALIDATION_FAILED` promise rejections. That
+was a test-harness promise-handling issue, not a production defect: `.rejects`
+handlers were attached after the create promises could settle. The correction is
+to attach the rejection assertions synchronously before releasing the row-lock
+holder. Subsequent execution passed without unhandled rejections. Independent
+Sonnet repeated the final test 5 times, all clean.
+
+PostgreSQL **16.14 was not personally re-run in this session (UNVERIFIED)**.
+
+P2A integration tests were not weakened.
+
+### Independent Sonnet P2B audit (PASS) and LOW remediation
+
+Independent Sonnet P2B audit: **PASS**, no HIGH or MEDIUM findings.
+
+| ID  | Severity          | Finding                                                                               | Closure                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| --- | ----------------- | ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| L-1 | LOW               | Duplicate-candidate `localeCompare` used the default locale                           | `compareDuplicateCandidates` pins `en-US`, adds partyType/matchReasons secondary keys, and `boundDuplicateCandidates` sorts before slicing to 10. Permanent CRM unit test. Matching eligibility unchanged.                                                                                                                                                                                                                                                                                                                      |
+| L-2 | LOW               | `createContact`/`createAddress` checked Party archive status from a pre-lock snapshot | Archive status is taken from the `SELECT … FOR UPDATE` row after owner-authoritative SELECT (non-owner still Forbidden without requiring UPDATE RLS). Concurrent archive-while-create-waits rejects with no contact/address row and no create audit. Opposite lock order: create commits, then archive succeeds; audit chain remains valid.                                                                                                                                                                                     |
+| L-3 | LOW/informational | `mapPartyDbError` might let SQLSTATE `23505` shadow Prisma `P2002` target metadata    | **Not confirmed.** A real duplicate `customerRole.create` yields `PrismaClientKnownRequestError` `P2002`. `meta.target` is absent (`meta` is `modelName` + `driverAdapterError`). `23505` lives at `meta.driverAdapterError.cause.originalCode`, not on the `.cause` chain `sqlState()` walks, so P2002 is reached. Production mapping was **not** changed. Mapped application error remains `CONFLICT` with the generic unique-violation message; no Prisma/SQL internals leak. Permanent integration test records this shape. |
+
+`42501 → NOT_FOUND` remains the deliberate fail-closed anti-enumeration mapping. It was not changed.
+
+Hash-chained audit writing is still duplicated between `apps/web/lib/services/auditService.ts` and `packages/crm/src/audit.ts`. That duplication is an **informational drift risk** and was not refactored in this narrow task.
+
+### Remaining risks
+
+- P2D must connect permission catalogue and API authorization.
+- Field masking is fail-closed until those permissions exist; tenant_admin
+  cannot see contact email/phone until P2D grants the pending keys.
+- Last-assignment enforcement is service-layer (deliberately not a circular
+  DB constraint).
+- Duplicate detection is advisory prefix/exact match on committed normalised
+  fields only.
+- Prisma adapter unique violations do not populate `meta.target`, so P2B
+  conflict messages stay generic unless P2D later maps adapter constraint
+  metadata without leaking internals.
+- Duplicated audit writers remain an informational drift risk.
+
+P2C–P2E have **not** started.

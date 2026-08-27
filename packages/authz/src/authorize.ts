@@ -70,7 +70,9 @@ export function can(ctx: AccessContext, input: AuthorizeInput): boolean {
 export interface FieldPolicyRule {
   entityType: string;
   fieldName: string;
-  requiredPermission: PermissionKey;
+  /** Catalogue key, or a declared-but-unseeded later-phase key. Unknown
+   * keys fail closed (the caller does not hold them). */
+  requiredPermission: string;
 }
 
 export function isFieldProtected(
@@ -79,6 +81,20 @@ export function isFieldProtected(
   fieldName: string,
 ): boolean {
   return policies.some((p) => p.entityType === entityType && p.fieldName === fieldName);
+}
+
+/** Permission-set lookup that accepts catalogue keys and declared-but-
+ * unseeded later-phase keys. Missing keys fail closed. */
+export function callerHasPermission(
+  ctx: AccessContext,
+  permission: string,
+  legalEntityId?: string | null,
+): boolean {
+  const scopedLegalEntityId = legalEntityId ?? null;
+  if (scopedLegalEntityId !== null && !hasLegalEntityAccess(ctx, scopedLegalEntityId)) {
+    return false;
+  }
+  return effectivePermissions(ctx, scopedLegalEntityId).has(permission);
 }
 
 /** Throws if the field is protected and the caller lacks the required
@@ -96,10 +112,9 @@ export function authorizeField(
     (p) => p.entityType === entityType && p.fieldName === fieldName,
   );
   if (!rule) return;
-  authorize(ctx, {
-    permission: rule.requiredPermission,
-    legalEntityId: legalEntityId ?? null,
-  });
+  if (!callerHasPermission(ctx, rule.requiredPermission, legalEntityId ?? null)) {
+    throw new ForbiddenError(`Missing permission: ${rule.requiredPermission}`);
+  }
 }
 
 /** Returns a shallow copy of `record` with any field the caller is not
@@ -117,12 +132,7 @@ export function maskProtectedFields<T extends Record<string, unknown>>(
   for (const policy of policies) {
     if (policy.entityType !== entityType) continue;
     if (!(policy.fieldName in result)) continue;
-    if (
-      !can(ctx, {
-        permission: policy.requiredPermission,
-        legalEntityId: legalEntityId ?? null,
-      })
-    ) {
+    if (!callerHasPermission(ctx, policy.requiredPermission, legalEntityId ?? null)) {
       delete result[policy.fieldName];
     }
   }

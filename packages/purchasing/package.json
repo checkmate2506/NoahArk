@@ -1,0 +1,24 @@
+{
+  "name": "@noahark/purchasing",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "scripts": {
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint ."
+  },
+  "dependencies": {
+    "@noahark/audit": "workspace:*",
+    "@noahark/core": "workspace:*",
+    "@noahark/crm": "workspace:*",
+    "@noahark/db": "workspace:*",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3",
+    "vitest": "4.1.10"
+  }
+}

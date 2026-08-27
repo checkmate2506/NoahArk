@@ -6,6 +6,7 @@ import {
   authorizeField,
   isFieldProtected,
   maskProtectedFields,
+  callerHasPermission,
   assertCanAssignRole,
   assertCanGrantLegalEntityAccess,
   type FieldPolicyRule,
@@ -125,6 +126,10 @@ describe("field-level access (check 5)", () => {
   it("allows a protected field with the required permission", () => {
     const c = ctx({ permissions: new Set([PERMISSIONS.DEMO_PROTECTED_FIELD_READ]) });
     expect(() => authorizeField(c, policies, "demo", "secret")).not.toThrow();
+  });
+
+  it("fails closed for an unseeded later-phase field permission key", () => {
+    expect(callerHasPermission(ctx(), "party_contact:email:read")).toBe(false);
   });
 
   it("masks protected fields the caller cannot see", () => {
