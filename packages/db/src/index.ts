@@ -6,3 +6,5 @@ export * from "./client";
 export * from "./safety";
 export * from "./tenantOwnedModels";
 export * from "./temporalInventory";
+export { writeAuditEventInTx } from "./auditWriter";
+export type { AuditEventInput } from "./auditWriter";

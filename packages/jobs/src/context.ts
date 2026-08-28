@@ -1,15 +1,10 @@
 import {
   withTenantContext,
   withPlatformAuditContext,
-  Prisma,
+  writeAuditEventInTx,
   type TransactionClient,
 } from "@noahark/db";
-import {
-  buildAuditEventRow,
-  chainKeyForTenant,
-  AUDIT_ACTIONS,
-  type AuditEventInput,
-} from "@noahark/audit";
+import { AUDIT_ACTIONS, type AuditEventInput } from "@noahark/audit";
 
 /**
  * F-20 (Phase 1B.1): this is the ONLY place a job/outbox handler receives a
@@ -104,53 +99,16 @@ export async function recordJobContextFailure(details: {
   }
 }
 
-/** Minimal, self-contained audit-chain append — the same append logic as
- * apps/web's writeAuditEvent (advisory-lock the chain, look up the latest
- * link by sequence, build and insert the next one), duplicated here rather
- * than imported because apps/web (which owns that function) depends on
- * this package, not the other way around — importing it here would be
- * circular. Used ONLY for the narrow job-context-failure case above. */
+/** Compatibility delegate (ADR-76). Persistence lives in
+ * `writeAuditEventInTx` (`@noahark/db`). This wrapper exists only so
+ * `recordJobContextFailure` keeps its historical call shape: it already
+ * holds a `TransactionClient` from `withTenantContext` or
+ * `withPlatformAuditContext` and must not open a second transaction.
+ * `@noahark/jobs` already depends on `@noahark/db`; the original copy
+ * existed because the writer previously lived in `apps/web`, which depends
+ * on this package. */
 async function writeAuditEventRaw(tx: TransactionClient, input: AuditEventInput) {
-  const chainKey = chainKeyForTenant(input.tenantId ?? null);
-  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${chainKey}))`;
-
-  const latest = await tx.auditEvent.findFirst({
-    where: { chainKey },
-    orderBy: { sequence: "desc" },
-    select: { hash: true, sequence: true },
-  });
-
-  const nextSequence = (latest?.sequence ?? 0n) + 1n;
-  const row = buildAuditEventRow(input, latest?.hash ?? null, nextSequence);
-
-  return tx.auditEvent.create({
-    data: {
-      tenantId: row.tenantId,
-      legalEntityId: row.legalEntityId,
-      actorUserId: row.actorUserId,
-      actorType: row.actorType,
-      action: row.action,
-      entityType: row.entityType,
-      entityId: row.entityId,
-      beforeData:
-        row.beforeData === null
-          ? Prisma.JsonNull
-          : (row.beforeData as Prisma.InputJsonValue),
-      afterData:
-        row.afterData === null
-          ? Prisma.JsonNull
-          : (row.afterData as Prisma.InputJsonValue),
-      requestId: row.requestId,
-      ipAddress: row.ipAddress,
-      userAgent: row.userAgent,
-      outcome: row.outcome,
-      chainKey: row.chainKey,
-      sequence: row.sequence,
-      prevHash: row.prevHash,
-      hash: row.hash,
-      createdAt: row.createdAt,
-    },
-  });
+  return writeAuditEventInTx(tx, input);
 }
 
 /**
