@@ -1,6 +1,6 @@
 # NoahArk — Phase 2 Implementation Record (Shared Parties & Catalog)
 
-> Status: **P2B implemented, uncommitted.** Independent Sonnet P2B audit:
+> Status: **P2C.1 implemented, uncommitted.** Independent Sonnet P2B audit:
 > **PASS** (no HIGH/MEDIUM). Two confirmed LOW findings and one plausible
 > LOW/informational finding were remediated or investigated in this working
 > tree (see §16). P2A schema/RLS/migrations remain authoritative. P2C–P2E have
@@ -410,3 +410,206 @@ Hash-chained audit writing is still duplicated between `apps/web/lib/services/au
 - Duplicated audit writers remain an informational drift risk.
 
 P2C–P2E have **not** started.
+
+## 17. P2C.1 — catalog domain services
+
+P2A schema/RLS and P2B party services are unchanged. P2C.1 adds no migration
+and does not start P2C.2 (pricing) or P2C.3 (custom fields). ADR-77 is
+authoritative for this slice and supersedes ADR-75's archival clause for
+P2C.1 only.
+
+### Services and package ownership
+
+| Service                                     | Package                                  | Notes                                           |
+| ------------------------------------------- | ---------------------------------------- | ----------------------------------------------- |
+| CatalogCategory, UnitOfMeasure              | `@noahark/catalog`                       | Tenant-wide reference data; `code` immutable    |
+| CatalogItem create/get/list/update/transfer | `@noahark/catalog`                       | Atomic bootstrap returns `{ item, assignment }` |
+| CatalogItemLegalEntityAssignment            | `@noahark/catalog`                       | Target-scoped, visibility-gated create          |
+| Thin re-export (22 functions only)          | `apps/web/lib/services/catalogDomain.ts` | For later P2D routes                            |
+
+Trusted-context helpers and pagination are imported from `@noahark/core`.
+Transactional audit persistence uses `writeAuditEventInTx` from `@noahark/db`
+via a thin `packages/catalog/src/audit.ts` delegate. No fourth writer.
+
+Every public operation takes server-derived `AccessContext` first.
+`requireNonEmptyLegalEntityScope` runs before the transaction, including on
+Category/UOM reads. Services never call `set_config` and never widen
+`ctx.legalEntityIds`. Transactions use PostgreSQL default isolation (READ
+COMMITTED): a statement issued after a competing commit sees that commit.
+
+Category and UOM tables have tenant-only RLS and no owner column, so an
+empty-legal-entity-scope session could write them at the database layer.
+The service-layer empty-scope check is the current fail-closed control.
+P2D must add permission catalogue entries and decide whether a database
+owner boundary is required.
+
+### Atomic bootstrap
+
+`createCatalogItem` takes `FOR SHARE` on an optional category then the
+required UOM (both must exist and be active), inserts the item, inserts
+the owner assignment, and writes `catalog_item.created` plus
+`catalog_item_assignment.created` in one transaction. Failure rolls back
+the whole unit. There is no advisory lock: the item id does not exist yet.
+
+### Ownership transfer and the advisory-lock requirement
+
+`transferCatalogItemOwnership` requires the current owner and the new
+owner in trusted context. It acquires
+`catalog-item-assignments:<tenantId>:<catalogItemId>` **before** the master
+`FOR UPDATE`, then re-checks owner from the locked row. Assignments are
+not touched. After A→B the assignment set remains `{A}` while owner is B.
+That state is an input to `shared_master_select`, so transfer participates
+in the same visibility decision assignment creation relies on.
+
+`updateCatalogItem` never changes `owner_legal_entity_id` and does not
+take the advisory key. Owner authority is checked from the SELECT snapshot
+**before** `FOR UPDATE` so an assigned non-owner is `FORBIDDEN`, not a
+false `NOT_FOUND`.
+
+### 1-A deactivation and change-detected references
+
+`isActive = false` means unavailable for newly introduced or changed
+references. Existing CatalogItem rows that already reference an inactive
+Category or UOM remain valid. Deactivate/activate lock the reference row
+`FOR UPDATE` and do **not** count items: Probe A showed a reference-count
+guard is blind under partial legal-entity scope.
+
+`updateCatalogItem` validates a category/UOM only when the payload
+introduces or changes the id relative to the **locked** row. Absent field:
+no write. Echo of the same id: no `FOR SHARE` (must succeed even if the
+row is now inactive). `null` categoryId clears without an active check.
+`null` versus absent stay distinguishable.
+
+### Assignment creation — target-scoped and visibility-gated
+
+Assignment creation is **not** self-service and **not** unrestricted
+self-assignment. Both conditions are required: the target legal entity is
+in `ctx.legalEntityIds`, **and** the CatalogItem is already visible through
+the ordinary owner-or-assigned SELECT policy. A B-only context cannot
+assign B to an item owned by and assigned only to A (`NOT_FOUND`, no row,
+no audit event). An assigned non-owner whose context also holds C may
+extend coverage to C. No explicit owner check is imposed. No master
+`FOR UPDATE` is taken on this path, because PostgreSQL would apply UPDATE
+`USING` expressions and silently impose owner-only authority.
+
+### Shared advisory key and the transfer/create TOCTOU
+
+Both `createCatalogItemAssignment` (before its visibility `findFirst`) and
+`transferCatalogItemOwnership` (before its master row lock) acquire
+`catalog-item-assignments:<tenantId>:<catalogItemId>`. Under READ
+COMMITTED the post-lock visibility read sees any transfer that committed
+while the create waited:
+
+- **Create-first:** the C assignment commits, then B→D transfer succeeds,
+  C remains ACTIVE.
+- **Transfer-first:** the create re-reads visibility after B→D, sees owner
+  D with assignments `{A}`, and returns `NOT_FOUND` with no C row and no
+  create audit event.
+
+Any future operation that changes `catalog_item.owner_legal_entity_id`
+must take this key first. Deadlock: every two-resource path takes advisory
+first; `updateCatalogItem` takes only the master row.
+
+### Last-ACTIVE guard
+
+Unconditional. `visibleActive` is an RLS-filtered lower bound, so a
+partial-scope caller can be refused even when another entity's ACTIVE
+assignment exists. That over-refusal is accepted (ADR-77(c)). Archived
+`entityItemCode` values remain reserved by the non-ACTIVE-scoped unique
+index; that is preserved, not "fixed".
+
+### `archiveCatalogItem` deferred
+
+No public archive, no internal cascade primitive, no `CATALOG_ITEM_ARCHIVED`
+action. P2D owns master archival together with the permission model.
+
+### Audit actions (14)
+
+`catalog_category.created/updated/deactivated/activated`,
+`unit_of_measure.created/updated/deactivated/activated`,
+`catalog_item.created/updated/ownership_transferred`,
+`catalog_item_assignment.created/updated/archived`.
+Metadata: `legalEntityId` is owner for the item, the row's entity for
+assignments, `null` for Category/UOM.
+
+### Error mapping
+
+Same shape as P2B: `42501` → `NOT_FOUND` (fail-closed anti-enumeration);
+`23505`/`P2002` → `CONFLICT`; `23503`/`P2003`/`23514` → `VALIDATION_FAILED`;
+`P2025` → `NOT_FOUND`; unknown rethrown. No `23P01` branch. Recorded P2B
+L-3 driver behaviour is unchanged: a real duplicate through the installed
+adapter raises `P2002`; `sqlState()` does not see `originalCode` nested
+under `meta.driverAdapterError`; `meta.target` is absent, so the generic
+P2002 conflict message is the normal path.
+
+### Tests
+
+Exact counts from this working tree after the quality gates (remediation
+session, including the C-18 supplementary production-transfer probe):
+
+| Suite                                                                   | Result                                                                             |
+| ----------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| `@noahark/catalog` unit                                                 | **22/22** (4 files)                                                                |
+| P2C.1 integration (`catalogDomain*.test.ts`, 6 files)                   | **18/18**                                                                          |
+| `catalogDomainConcurrency.test.ts` repeated 5×                          | **12/12** each run (C-18 both orderings + production-transfer advisory-lock probe) |
+| P2A integration (schema/RLS/ownership/custom-field/attachment/temporal) | **60/60** (6 files; not weakened)                                                  |
+| P2B integration (`partyDomain*.test.ts`, 9 files)                       | **34/34**                                                                          |
+| Full `@noahark/web` integration                                         | **428/428** (52 files) on PostgreSQL **18.4**                                      |
+
+C-18 remains the decisive TOCTOU regression for both transfer/create
+orderings. The supplementary probe holds
+`catalog-item-assignments:<tenantId>:<catalogItemId>` from a raw
+`noahark_app` transaction and starts the real `transferCatalogItemOwnership`
+service: the service is proven blocked on that advisory lock (ownership and
+transfer audit unchanged while held), then succeeds after release with one
+owner change, one version increment, unchanged assignments, exactly one
+`catalog_item.ownership_transferred` event, and a valid audit chain.
+
+C-16 (in-suite) reads the tenant chain ordered by `sequence`, asserts
+gapless sequences and `verifyAuditChain(links).valid === true`. That test
+writes five catalog-domain events on the chain (`unit_of_measure.created`,
+`catalog_item.created`, `catalog_item_assignment.created`,
+`catalog_item.updated`, `catalog_item.ownership_transferred`) plus any
+earlier events from the same tenant; all were verified before the
+disposable database was dropped.
+
+### Independent Sonnet P2C.1 audit (initial NO) and remediation
+
+Independent Sonnet P2C.1 audit: **NO** for merge/readiness. Findings:
+
+| ID       | Severity  | Finding                                                                                                                                                        | Closure                                                                                                                                                                                     |
+| -------- | --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| —        | —         | No production-code defect                                                                                                                                      | Unchanged. Services were not modified in remediation.                                                                                                                                       |
+| C-18 gap | Test      | Transfer-first race mutates ownership with raw SQL; missing live black-box proof that the real `transferCatalogItemOwnership` waits on the shared advisory key | Supplementary probe added to `catalogDomainConcurrency.test.ts`. The real service blocked on the externally held key, then committed correctly after release. 5× concurrency repeats clean. |
+| Docs     | Editorial | Test-results table was not formatted as a markdown table                                                                                                       | Reformatted in the Tests table above with exact post-remediation counts.                                                                                                                    |
+| Docs     | Editorial | Duplicated closing sentence “P2C.2 and P2C.3 have not started.”                                                                                                | Duplicate removed.                                                                                                                                                                          |
+
+The auditor accidentally applied already-committed migrations
+`20260824000003_parties_catalog` and `20260824000004_p2a_audit_hardening`
+to the persistent `noahark` database. No P2C.1 schema exists or was
+applied. No existing business-row data was altered as part of P2C.1. The
+database is now at committed migrations 00001–00004
+(`20260817000001_init`, `20260817000002_rls_and_constraints`,
+`20260824000003_parties_catalog`, `20260824000004_p2a_audit_hardening`).
+It was not reset or rolled back. Read-only `prisma migrate status` reports
+the schema up to date. Disposable `noahark_test_integration_*` databases
+are created and dropped per suite; none remain after teardown.
+
+### PostgreSQL versions
+
+PostgreSQL **18.4** (`x86_64-windows`, MSVC) via `embedded-postgres`.
+PostgreSQL **16.14 was not run in this session (UNVERIFIED)**.
+
+### Initial gate failures
+
+1. `catalogScopeBoundary` first run: `findBannedTokens` used substring
+   `includes()`, so `archiveCatalogItemAssignment` matched banned
+   `archiveCatalogItem` and `means` in stripped-then-rescanned comments
+   matched `ean`. Corrected to word-boundary matching; in-memory fixtures
+   prove `archiveCatalogItem(` is still detected.
+2. Repo-wide `pnpm format:check` fails on many pre-existing files outside
+   this slice. P2C.1 paths were formatted and pass `prettier --check`.
+3. `pnpm audit --prod` reports a pre-existing high in Prisma's
+   `deepmerge-ts` (not introduced here; no version bump).
+
+P2C.2 and P2C.3 have **not** started.

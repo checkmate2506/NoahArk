@@ -19,6 +19,7 @@
     "@noahark/audit": "workspace:*",
     "@noahark/auth": "workspace:*",
     "@noahark/authz": "workspace:*",
+    "@noahark/catalog": "workspace:*",
     "@noahark/config": "workspace:*",
     "@noahark/core": "workspace:*",
     "@noahark/crm": "workspace:*",
