@@ -31,6 +31,47 @@ function p2002Target(error: Prisma.PrismaClientKnownRequestError): string {
   return "";
 }
 
+const EXCLUSION_MARKERS = new Set(["23P01", "exclusion_violation"]);
+const MAX_EXCLUSION_DEPTH = 12;
+
+/**
+ * Dedicated detector for gist exclusion failures. Inspects only structured
+ * fields demonstrated by the live Prisma adapter probe (P2039 wrapping
+ * nested code/originalCode 23P01, kind postgres): code, originalCode,
+ * kind, cause, and meta.driverAdapterError. Cycle-guarded and depth-bounded.
+ * Does not substring-scan message text. Unrecognised shapes return false so
+ * mapCatalogDbError rethrows unchanged. sqlState() is deliberately not used
+ * and must remain byte-identical.
+ */
+function isExclusionViolation(error: unknown): boolean {
+  const seen = new Set<unknown>();
+
+  function walk(node: unknown, depth: number): boolean {
+    if (!node || typeof node !== "object" || depth > MAX_EXCLUSION_DEPTH) {
+      return false;
+    }
+    if (seen.has(node)) return false;
+    seen.add(node);
+    const rec = node as {
+      code?: unknown;
+      originalCode?: unknown;
+      kind?: unknown;
+      cause?: unknown;
+      meta?: { driverAdapterError?: unknown };
+    };
+    if (typeof rec.code === "string" && EXCLUSION_MARKERS.has(rec.code)) return true;
+    if (typeof rec.originalCode === "string" && EXCLUSION_MARKERS.has(rec.originalCode)) {
+      return true;
+    }
+    if (typeof rec.kind === "string" && EXCLUSION_MARKERS.has(rec.kind)) return true;
+    if (walk(rec.cause, depth + 1)) return true;
+    if (walk(rec.meta?.driverAdapterError, depth + 1)) return true;
+    return false;
+  }
+
+  return walk(error, 0);
+}
+
 /**
  * A real duplicate insert through the installed Prisma driver adapter raises
  * PrismaClientKnownRequestError with code P2002. `sqlState()` walks the `.cause`
@@ -58,6 +99,10 @@ export function mapCatalogDbError(error: unknown, resource: string): never {
     throw new ValidationError(`${resource} failed a database constraint`);
   }
 
+  if (isExclusionViolation(error)) {
+    throw new ConflictError("A price for this item already covers part of that period");
+  }
+
   if (error instanceof Prisma.PrismaClientKnownRequestError) {
     if (error.code === "P2002") {
       const target = p2002Target(error);
@@ -79,6 +124,17 @@ export function mapCatalogDbError(error: unknown, resource: string): never {
       }
       if (target.includes("unit_of_measure_tenant_id_code")) {
         throw new ConflictError("Unit of measure code is already in use");
+      }
+      if (target.includes("price_list_tenant_id_code")) {
+        throw new ConflictError("Price list code is already in use");
+      }
+      if (target.includes("price_list_id") && target.includes("legal_entity_id")) {
+        throw new ConflictError(
+          "This price list is already assigned to that legal entity",
+        );
+      }
+      if (target.includes("price_list_assignment_one_default_per_entity")) {
+        throw new ConflictError("That legal entity already has a default price list");
       }
       throw new ConflictError(`${resource} conflicts with an existing record`);
     }

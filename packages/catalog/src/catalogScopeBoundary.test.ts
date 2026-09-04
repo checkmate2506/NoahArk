@@ -1,30 +1,14 @@
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { findBannedTokens } from "./bannedTokenScan";
 import * as catalog from "./index";
 
 const srcRoot = fileURLToPath(new URL(".", import.meta.url));
 
-export function findBannedTokens(source: string, banned: string[]): string[] {
-  return banned.filter((token) => {
-    const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    return new RegExp(`\\b${escaped}\\b`).test(source);
-  });
-}
-
 function stripComments(source: string): string {
   return source.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/\/\/.*$/gm, " ");
-}
-
-function walkProductionTs(dir: string): string[] {
-  const out: string[] = [];
-  for (const entry of readdirSync(dir)) {
-    const full = join(dir, entry);
-    if (statSync(full).isDirectory()) out.push(...walkProductionTs(full));
-    else if (entry.endsWith(".ts") && !entry.endsWith(".test.ts")) out.push(full);
-  }
-  return out;
 }
 
 function functionBody(source: string, name: string): string {
@@ -67,6 +51,27 @@ const BANNED = [
   "deleteMany",
 ];
 
+const FULL_BAN = [...BANNED, "archivePriceList"];
+const REDUCED_BAN = [
+  ...BANNED.filter(
+    (token) => token !== "23P01" && token !== "exclusion" && token !== "priceList",
+  ),
+  "archivePriceList",
+];
+
+const FULL_BAN_FILES = [
+  "catalogCategoryService.ts",
+  "unitOfMeasureService.ts",
+  "catalogItemService.ts",
+  "catalogAssignmentService.ts",
+  "locking.ts",
+  "search.ts",
+  "schemas.ts",
+  "audit.ts",
+] as const;
+
+const REDUCED_BAN_FILES = ["errors.ts", "index.ts"] as const;
+
 const SERVICE_EXPORTS = [
   "createCatalogCategory",
   "getCatalogCategory",
@@ -108,27 +113,50 @@ describe("findBannedTokens", () => {
 });
 
 describe("catalog production source scope", () => {
-  const files = walkProductionTs(srcRoot);
-  const combined = files.map((f) => stripComments(readFileSync(f, "utf8"))).join("\n");
+  const fullBanFiles = FULL_BAN_FILES.map((name) => join(srcRoot, name));
+  const reducedBanFiles = REDUCED_BAN_FILES.map((name) => join(srcRoot, name));
+  const fullCombined = fullBanFiles
+    .map((f) => stripComments(readFileSync(f, "utf8")))
+    .join("\n");
+  const reducedCombined = reducedBanFiles
+    .map((f) => stripComments(readFileSync(f, "utf8")))
+    .join("\n");
 
   it("scans a non-empty production file list", () => {
-    expect(files.length).toBeGreaterThan(0);
-    expect(files.every((f) => !f.endsWith(".test.ts"))).toBe(true);
+    expect(fullBanFiles.length).toBeGreaterThan(0);
+    expect(reducedBanFiles.length).toBe(2);
+    expect(fullBanFiles.every((f) => !f.endsWith(".test.ts"))).toBe(true);
   });
 
   it("contains none of the banned tokens", () => {
-    expect(findBannedTokens(combined, BANNED)).toEqual([]);
-    expect(combined).not.toMatch(/\bparent\b/);
-    expect(combined).not.toMatch(/\bdepth\b/);
-    expect(combined).not.toMatch(/\bancestors\b/);
-    expect(combined).not.toMatch(/\bratio\b/);
-    expect(combined).not.toMatch(/\.delete\s*\(/);
-    expect(combined).not.toMatch(/if\s*\([^)]*taxCategoryCode/);
-    expect(combined).not.toMatch(/switch\s*\([^)]*taxCategoryCode/);
+    expect(findBannedTokens(fullCombined, FULL_BAN)).toEqual([]);
+    expect(findBannedTokens(reducedCombined, REDUCED_BAN)).toEqual([]);
+    expect(fullCombined).not.toMatch(/\bparent\b/);
+    expect(fullCombined).not.toMatch(/\bdepth\b/);
+    expect(fullCombined).not.toMatch(/\bancestors\b/);
+    expect(fullCombined).not.toMatch(/\bratio\b/);
+    expect(fullCombined).not.toMatch(/\.delete\s*\(/);
+    expect(fullCombined).not.toMatch(/if\s*\([^)]*taxCategoryCode/);
+    expect(fullCombined).not.toMatch(/switch\s*\([^)]*taxCategoryCode/);
+  });
+
+  it("reduced ban still detects set_config and archiveCatalogItem", () => {
+    expect(findBannedTokens("hello set_config world", REDUCED_BAN)).toEqual([
+      "set_config",
+    ]);
+    expect(findBannedTokens("archiveCatalogItem(", REDUCED_BAN)).toEqual([
+      "archiveCatalogItem",
+    ]);
+    expect(REDUCED_BAN).not.toContain("23P01");
+    expect(REDUCED_BAN).not.toContain("exclusion");
+    expect(REDUCED_BAN).not.toContain("priceList");
+    expect(REDUCED_BAN).toContain("archivePriceList");
+    expect(FULL_BAN).toContain("archivePriceList");
+    expect(FULL_BAN).toContain("23P01");
   });
 
   it("only uses the assignment advisory key", () => {
-    const lockHits = combined.match(/pg_advisory_xact_lock[\s\S]{0,200}/g) ?? [];
+    const lockHits = fullCombined.match(/pg_advisory_xact_lock[\s\S]{0,200}/g) ?? [];
     expect(lockHits.length).toBeGreaterThan(0);
     for (const hit of lockHits) {
       expect(hit).toContain("catalog-item-assignments:");
@@ -136,7 +164,7 @@ describe("catalog production source scope", () => {
   });
 
   it("does not acquire a lock after writeAuditEvent in the same function", () => {
-    for (const file of files) {
+    for (const file of fullBanFiles) {
       const source = stripComments(readFileSync(file, "utf8"));
       const fns = source.split(/export async function /).slice(1);
       for (const fn of fns) {

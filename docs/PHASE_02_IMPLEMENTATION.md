@@ -613,3 +613,187 @@ PostgreSQL **16.14 was not run in this session (UNVERIFIED)**.
    `deepmerge-ts` (not introduced here; no version bump).
 
 P2C.2 and P2C.3 have **not** started.
+
+## 18. P2C.2 — pricing domain services
+
+P2A schema/RLS, P2B party services and P2C.1 catalog services are unchanged.
+P2C.2 adds no migration and does not start P2C.3 (typed custom fields).
+ADR-78 is authoritative for this slice.
+
+### Services and package ownership
+
+| Service                                     | Package                                  | Notes                                                                    |
+| ------------------------------------------- | ---------------------------------------- | ------------------------------------------------------------------------ |
+| PriceList create/get/list/update/transfer   | `@noahark/catalog`                       | Atomic bootstrap returns `{ priceList, assignment }`; currency immutable |
+| PriceListLegalEntityAssignment              | `@noahark/catalog`                       | Target-scoped, visibility-gated create; last-ACTIVE guard                |
+| setDefaultPriceList                         | `@noahark/catalog`                       | Per-entity at-most-one ACTIVE default; no `expectedVersion`              |
+| PriceListEntry create/get/list/update/close | `@noahark/catalog`                       | Gist exclusion is the overlap authority; close is strict-shrink          |
+| resolveEffectivePrice                       | `@noahark/catalog`                       | Explicit `onDate`; read-only; no audit                                   |
+| Thin re-export                              | `apps/web/lib/services/catalogDomain.ts` | Adds the pricing functions beside the P2C.1 barrel                       |
+
+Transactional audit persistence uses `writeAuditEventInTx` via
+`packages/catalog/src/audit.ts`. No fourth writer.
+
+### Frozen contracts
+
+- `requireNonEmptyLegalEntityScope` before every transaction.
+- No `archivePriceList`. No DELETE on any pricing table.
+- Currency and `ownerLegalEntityId` are omitted from the PriceList update schema.
+- Entry `unitPrice` crosses every boundary as a decimal string; canonical
+  output is always 6 fractional digits. Civil dates are `YYYY-MM-DD` only.
+- `resolveEffectivePrice` has no implicit "today".
+- Archiving an assignment permanently prevents re-assigning that price list
+  to that legal entity (`(price_list_id, legal_entity_id)` UNIQUE, no status
+  predicate). Entries remain readable and closeable, but are ineligible for
+  resolution.
+
+### Lock order
+
+| Step | Resource                                                                                | Who takes it                                           |
+| ---- | --------------------------------------------------------------------------------------- | ------------------------------------------------------ |
+| 1    | advisory `price-list-default:<tenantId>:<legalEntityId>`                                | update/archive assignment, setDefault                  |
+| 2    | advisory `price-list-assignments:<tenantId>:<priceListId>` (lexicographic when several) | create/update/archive assignment, transfer, setDefault |
+| 3    | `price_list FOR UPDATE`                                                                 | updatePriceList, transferPriceListOwnership only       |
+| 4    | assignment row `FOR UPDATE` / `FOR SHARE`                                               | mutating assignment vs entry create/update             |
+| 5    | catalog-item assignment `FOR SHARE`                                                     | entry create/update, after step 4                      |
+| 6    | `price_list_entry FOR UPDATE`                                                           | update, close                                          |
+| 7    | audit chain                                                                             | `writeAuditEventInTx`, always last                     |
+
+No pricing path takes `catalog-item-assignments:`. No master row lock on
+entry, assignment-create or default paths.
+
+Create versus assignment-suspend overlap: `createPriceListEntry` takes
+`FOR SHARE` on the relevant assignment row and takes no advisory key.
+`updatePriceListAssignment` / `updateCatalogItemAssignment` take `FOR UPDATE`
+on that same row. An in-flight create that already holds `FOR SHARE` therefore
+forces suspend to wait, and create always commits first. Suspend-first is
+possible only when suspend commits before create acquires `FOR SHARE`; create
+then fails closed with `ConflictError`, leaves no entry and no
+`price_list_entry.created` event. Both orderings are proven with
+`pg_stat_activity` lock waiters rather than `Promise.allSettled` races.
+
+### Default semantics
+
+Uniqueness is `legal_entity_id`, status-scoped: at most one ACTIVE default,
+never exactly one. Two rejected no-ops (`VALIDATION_FAILED`, no write, no
+audit): (1) setting the assignment that is already the ACTIVE default;
+(2) clearing with `priceListId = null` when no ACTIVE default exists.
+First-time set, swap and clear each write exactly one
+`price_list_assignment.default_changed` event and increment each changed
+assignment version once.
+
+### Numeric and civil-date rules
+
+`parseDecimalString` accepts only
+`/^(?:0|[1-9][0-9]{0,16})(?:\.[0-9]{1,6})?$/` after trim.
+`formatDecimal` always returns 6 fractional digits.
+`parseCivilDate` requires `YYYY-MM-DD` and a real calendar day, constructed
+as UTC. No `Date.now()` and no implicit today on any pricing semantic path.
+
+### ADR-78 lifecycle
+
+Assignment suspend/archive does not inspect entries. Close-on-inactive is
+permitted and does not read masters or assignments. Status leaving ACTIVE
+clears `isDefault` because the default index predicate is status-scoped.
+`closePriceListEntry` is strict-shrink-only and cannot reopen.
+`updatePriceListEntry` remains the general ACTIVE-state edit and may change
+or clear `effectiveTo`, subject to validation and the gist exclusion
+constraint.
+
+### Error mapping and sanitized 23P01 shape
+
+Existing SQLSTATE/Prisma branches are unchanged. Additive P2002 targets:
+`price_list_tenant_id_code`, `(price_list_id, legal_entity_id)`,
+`price_list_assignment_one_default_per_entity`.
+`isExclusionViolation` maps a live gist exclusion to
+`ConflictError("A price for this item already covers part of that period")`.
+`sqlState()` is byte-identical.
+
+Sanitized live Prisma-adapter shape captured through
+`tx.priceListEntry.create` on a disposable database (SQL text, bound
+parameters, stacks, connection details, constraint names, `message`,
+`originalMessage`, `detail` and `hint` values redacted):
+
+- class name: `PrismaClientKnownRequestError`
+- top-level `code`: `P2039`
+- top-level key names: `clientVersion`, `code`, `meta`, `name`
+- `meta` key names: `driverAdapterError`, `modelName`
+- nested `meta.driverAdapterError` class name: `DriverAdapterError`
+- nested `driverAdapterError` key names: `cause`, `name`
+- nested `cause` key names: `code`, `column`, `detail`, `hint`, `kind`,
+  `message`, `originalCode`, `originalMessage`, `severity`
+- nested `cause` structured values: `code` = `23P01`,
+  `originalCode` = `23P01`, `kind` = `postgres`
+
+The detector matches only the exact values `23P01` or
+`exclusion_violation` on `code` / `originalCode` / `kind`. It does not
+treat `kind` = `postgres` as a match (that would be far too broad). The
+live mapping therefore fires on nested `code` / `originalCode` = `23P01`.
+
+The detector inspects only `code`, `originalCode`, `kind`, `cause` and
+`meta.driverAdapterError`, is cycle-guarded and depth-bounded, matches only
+those exact values, and returns false for unrecognised shapes.
+
+### Audit actions (10)
+
+`price_list.created/updated/ownership_transferred`,
+`price_list_assignment.created/updated/archived/default_changed`,
+`price_list_entry.created/updated/closed`.
+No `price_list.archived`. Monetary amounts in payloads are 6-decimal
+strings; civil dates are `YYYY-MM-DD`.
+
+### Tests
+
+Exact counts from this working tree after the quality gates:
+
+| Suite                                          | Result                                                                                                                   |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `@noahark/catalog` unit                        | **47/47** (7 files; 56/56 was inflated by 9 duplicated `catalogScopeBoundary` tests registered via a `*.test.ts` import) |
+| `@noahark/audit` unit                          | **28/28** (2 files)                                                                                                      |
+| `@noahark/web` unit                            | **64/64** (9 files)                                                                                                      |
+| P2C.2 integration (`pricingDomain*.test.ts`)   | **14/14** (7 files)                                                                                                      |
+| `pricingDomainConcurrency.test.ts` repeated 5× | **7/7** each run                                                                                                         |
+| P2C.1 integration (`catalogDomain*.test.ts`)   | **18/18** (6 files), unweakened                                                                                          |
+| P2A integration (six files)                    | **60/60**                                                                                                                |
+| P2B integration (`partyDomain*.test.ts`)       | **34/34** (9 files)                                                                                                      |
+| Phase 1 audit/security/concurrency subset      | **43/43** (5 files)                                                                                                      |
+| Full `@noahark/web` integration                | **442/442** (59 files) on PostgreSQL **18.4**                                                                            |
+
+Live audit-chain verification ran inside
+`pricingDomainConcurrency.test.ts` on a disposable database:
+`verifyAuditChain(...).valid === true` and sequences were gapless.
+
+### PostgreSQL versions
+
+PostgreSQL **18.4** (`x86_64-windows`, MSVC) via `embedded-postgres` on
+port 55432. PostgreSQL **16.14 NOT RUN (UNVERIFIED)**.
+
+### Initial gate failures
+
+1. `SET TIME ZONE $1` is invalid PostgreSQL; the resolution timezone loop
+   now uses an allowlisted `SET TIME ZONE '<zone>'` string.
+2. Default/concurrency tests attempted to create an owner assignment that
+   `createPriceList` already bootstraps; those duplicate creates were
+   removed.
+3. Last-ACTIVE assignment mutations after adding entity B must use
+   `ctxAB`, not `ctxA` (ADR-77(c) over-refusal). Fixed.
+4. Live 23P01 shape was first documented as `kind = exclusion_violation`.
+   The Prisma adapter probe showed top-level `P2039` and nested
+   `kind = postgres`; docs and ADR-78 were corrected to the live shape.
+5. `@noahark/web` lint unused imports/bindings in two integration files;
+   typecheck failed on Prisma spy assignments. Both were fixed.
+6. Independent Sonnet pre-commit audit found that committed HEAD's
+   `docs/DECISION_REGISTER.md` already passed Prettier; the working-tree
+   failure was introduced by the ADR-78 row. Remediation ran
+   `prettier --write` on that file (authorised Markdown-table realignment).
+   ADR-71–77 wording is unchanged aside from wrapping; ADR-78 wording is
+   unchanged. The earlier claim that committed wrapping already failed
+   Prettier was incorrect.
+7. Independent Sonnet audit of `pnpm audit --prod` reported two HIGH
+   advisories (`deepmerge-ts` and `mysql2`), not one. A later re-run in
+   this remediation reported six HIGH and one moderate, all pre-existing
+   Prisma-transitive findings (`deepmerge-ts`, `mysql2`, and `fast-uri`
+   via `@prisma/dev`); none were introduced by P2C.2 and no dependency
+   was bumped.
+
+P2C.3 has **not** started.

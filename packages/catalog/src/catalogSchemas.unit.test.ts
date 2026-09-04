@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { Prisma } from "@noahark/db";
 import {
   boundPageSize,
+  ConflictError,
   decodeCreatedAtIdCursor,
   encodeCreatedAtIdCursor,
   ValidationError,
@@ -224,8 +225,14 @@ describe("mapCatalogDbError", () => {
     }
   });
 
-  it("rethrows synthetic 23P01 without mapping", () => {
+  it("maps synthetic 23P01 to CONFLICT without leaking internals", () => {
     const err = { code: "23P01", message: "exclusion_violation" };
-    expect(() => mapCatalogDbError(err, "Catalog item")).toThrow(err);
+    try {
+      mapCatalogDbError(err, "Catalog item");
+      throw new Error("expected mapping");
+    } catch (error) {
+      expect(error).toBeInstanceOf(ConflictError);
+      leak((error as Error).message);
+    }
   });
 });
