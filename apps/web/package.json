@@ -23,6 +23,7 @@
     "@noahark/config": "workspace:*",
     "@noahark/core": "workspace:*",
     "@noahark/crm": "workspace:*",
+    "@noahark/custom-fields": "workspace:*",
     "@noahark/db": "workspace:*",
     "@noahark/purchasing": "workspace:*",
     "@noahark/files": "workspace:*",

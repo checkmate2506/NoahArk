@@ -796,4 +796,192 @@ port 55432. PostgreSQL **16.14 NOT RUN (UNVERIFIED)**.
    via `@prisma/dev`); none were introduced by P2C.2 and no dependency
    was bumped.
 
-P2C.3 has **not** started.
+## 19. P2C.3 — typed custom-field domain services
+
+P2C.3 implements `@noahark/custom-fields` and a thin
+`apps/web/lib/services/customFieldDomain.ts` re-export on the unchanged P2A
+schema (ADR-79). Allowed runtime dependencies are `@noahark/core`,
+`@noahark/db`, `@noahark/audit` and `zod`. The package does not import
+CRM, Catalog, apps/web, Next.js, or system/worker clients.
+
+### Public surface
+
+Definitions: `createCustomFieldDefinition`, `getCustomFieldDefinition`,
+`listCustomFieldDefinitions`, `updateCustomFieldDefinition`,
+`deactivateCustomFieldDefinition`, `activateCustomFieldDefinition`.
+
+Values: `setCustomFieldValue`, `getCustomFieldValue`,
+`listCustomFieldValues`. There is no clear, delete, unset or archive
+operation.
+
+Every operation takes `AccessContext` first, calls
+`requireNonEmptyLegalEntityScope` before opening a transaction, and uses
+`withTenantContext` with ordinary `noahark_app` RLS.
+
+Definitions persist `legalEntityId: null`. List order is `createdAt ASC,
+id ASC`. `displayOrder` is returned and is not the pagination key.
+`entityType`, `key` and `dataType` are absent from the update schema.
+
+Supported tagged types: STRING, INTEGER, DECIMAL, BOOLEAN, DATE,
+SINGLE_SELECT. Rejected: NUMBER, MULTI_SELECT, `demo_approval_subject`,
+legacy JSON, untagged envelopes. DECIMAL is a signed NUMERIC(23,6)
+string parser that does not reuse the non-negative pricing parser.
+Storage writes exactly one typed column; the legacy JSON column stays
+SQL NULL (`Prisma.DbNull`).
+
+Targets: the nine Phase 2 types. Shared masters derive the owner legal
+entity; assignments and roles use their own `legalEntityId`. ARCHIVED
+targets are rejected. SUSPENDED entity-scoped targets remain writable.
+Assigned non-owners of a shared master cannot read or write the owner's
+value.
+
+### Lock order (setCustomFieldValue)
+
+1. advisory `custom-field-value:<tenantId>:<definitionId>:<entityId>`
+2. definition FOR SHARE
+3. target FOR SHARE
+4. existing value FOR UPDATE
+5. audit-chain advisory last (inside `writeAuditEventInTx`)
+
+Definition mutations lock the definition FOR UPDATE. Catalog/pricing
+assignment advisory keys are not taken.
+
+### Audit
+
+Six constants only: `custom_field_definition.created/updated/deactivated/activated`
+and `custom_field_value.created/updated`. Definition events use
+`legalEntityId: null`. Value events use the derived legal entity.
+Payloads contain identifiers, type, lifecycle and version only — never
+field values.
+
+### Error mapping and sanitized 23514 shape
+
+`pgErrorCode()` is cycle-guarded and depth-bounded over `code`,
+`originalCode`, `cause` and `meta.driverAdapterError`. Exact five-digit
+SQLSTATE match. No message-text scan.
+
+Live probe: `tx.customFieldValue.create` with two typed columns set, on a
+disposable database through the normal Prisma/adapter stack.
+
+Sanitized live shape (SQL, parameters, stacks, connection details,
+constraint names, `message` / `originalMessage` / `detail` / `hint`
+redacted):
+
+- class name: `PrismaClientKnownRequestError`
+- nested structured `originalCode`: `23514`
+
+Public mapping is the fixed service-authored
+`ValidationError("Custom field value failed a storage constraint")`.
+
+Other mappings: 42501 → NOT_FOUND; 23505 / P2002 → CONFLICT; 23503 /
+P2003 → VALIDATION_FAILED; P2025 → NOT_FOUND; expected-version miss →
+STALE_VERSION; inactive definition → CONFLICT; invisible target →
+NOT_FOUND.
+
+### Tests actually run
+
+| Suite                                              | Result                                        |
+| -------------------------------------------------- | --------------------------------------------- |
+| `@noahark/custom-fields` unit                      | **35/35** (5 files)                           |
+| `@noahark/catalog` unit                            | **47/47** (7 files)                           |
+| `@noahark/audit` unit                              | **28/28** (2 files)                           |
+| `@noahark/core` unit                               | **23/23** (4 files)                           |
+| `@noahark/web` unit                                | **64/64** (9 files)                           |
+| P2C.3 integration (`customFieldDomain*.test.ts`)   | **29/29** (8 files)                           |
+| `customFieldDomainConcurrency.test.ts` repeated 5× | **7/7** each run                              |
+| P2C.2 integration (`pricingDomain*.test.ts`)       | **14/14** (7 files)                           |
+| P2C.1 integration (`catalogDomain*.test.ts`)       | **18/18** (6 files)                           |
+| P2B integration (`partyDomain*.test.ts`)           | **34/34** (9 files)                           |
+| P2A six-file subset                                | **60/60** (6 files; see breakdown below)      |
+| Phase 1 audit/security/concurrency subset          | see clarification below                       |
+| Full `@noahark/web` integration                    | **471/471** (67 files) on PostgreSQL **18.4** |
+
+Canonical P2A six-file subset (independently verified; no P2A test was
+removed, skipped, renamed or weakened — the earlier **59/59** figure was
+a reporting/selection error only):
+
+| File                                 | Tests  |
+| ------------------------------------ | ------ |
+| `partiesCatalogSchema.test.ts`       | 14     |
+| `partiesCatalogRls.test.ts`          | 15     |
+| `partiesCatalogOwnership.test.ts`    | 9      |
+| `customFieldTargetIntegrity.test.ts` | 12     |
+| `attachmentCatalogBoundary.test.ts`  | 3      |
+| `temporalSchemaConformance.test.ts`  | 7      |
+| **Total**                            | **60** |
+
+Phase 1 subset clarification: the implementation run reported **43/43**
+across five named files. The exact canonical five-file definition is not
+recorded in this document. The independent Sonnet audit’s thematic
+reconstruction passed **44/44**. The specifically named “Phase 1
+five-file subset” therefore remains **UNVERIFIED** as a reproducible
+fixed subset. Full `@noahark/web` integration still independently passed
+**471/471**.
+
+Live audit-chain verification ran inside
+`customFieldDomainConcurrency.test.ts` and
+`customFieldDomainAudit.test.ts` on disposable databases:
+`verifyAuditChain(...).valid === true` and sequences were gapless.
+
+### PostgreSQL versions
+
+PostgreSQL **18.4** via `embedded-postgres` on disposable integration
+databases (`SELECT version()` asserted in
+`customFieldDomainErrorMapping.test.ts`). PostgreSQL **16.14 NOT RUN
+(UNVERIFIED)**.
+
+### Initial gate failures
+
+1. Typecheck rejected JSON `null` assignments under Prisma 7's
+   `exactOptionalPropertyTypes` contract. Production now writes SQL NULL
+   for the unused JSON column and unused definition `options` via
+   `Prisma.DbNull`.
+2. Ownership-transfer-first versus `setCustomFieldValue` was first
+   expected to surface `ForbiddenError`. After the holder commits the
+   owner change, the waiter's target `FOR SHARE` is filtered by the
+   owner-only UPDATE policy and returns no row, so the service fail-closes
+   as `NotFoundError("Target")`. The concurrency test was corrected to
+   that observed result. Assigned-non-owner writes that can still SELECT
+   the master continue to fail as `ForbiddenError` from the owner check.
+3. `@noahark/web` lint reported unused imports in
+   `customFieldDomainIsolation.test.ts` and
+   `customFieldDomainRlsAdversarial.test.ts`. Both were removed.
+
+### Independent Sonnet P2C.3 audit
+
+Independent Sonnet P2C.3 audit: **PASS**. No HIGH or MEDIUM defect was
+found in the P2C.3 changeset.
+
+The audit found that all 28 new files initially failed Prettier while
+the five modified files already passed. Formatting was applied to those
+28 files without semantic change. The audit’s required production
+`next build` regenerated `apps/web/next-env.d.ts`; that generated file
+was restored to HEAD. P2D was not started.
+
+### Dependency security (`pnpm audit --prod`)
+
+The implementation run could not complete `pnpm audit --prod` (registry
+bulk-advisory request failed, then timed out). The independent audit
+subsequently completed it and observed **10** vulnerabilities: **2**
+critical, **7** high, **1** moderate. That result included a **direct**
+Next.js 16.3.1 security advisory and other Prisma/Next.js-related
+**transitive** findings.
+
+P2C.3 introduced **no** external dependency version upgrade. These
+advisories are not claimed to have been introduced by P2C.3, and the
+counts are not claimed to be permanent. Dependency security remediation
+is a **separate required follow-up before deployment/P2D**. No
+dependency or lockfile entry is changed in this cleanup.
+
+### P2D deferred work
+
+- Permission-gate definition management.
+- Decide whether APIs need an expanded assigned-reader value model and
+  matching database policy.
+- Clear/delete semantics together with DELETE-grant / RLS work.
+- Master archival of custom-field targets.
+- Display-specific definition ordering.
+- NUMBER / MULTI_SELECT remain unsupported.
+- Dependency security remediation (see above).
+
+P2C.3 remains **uncommitted**.

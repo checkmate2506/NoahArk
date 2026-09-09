@@ -197,4 +197,10 @@ export const AUDIT_ACTIONS = {
   PRICE_LIST_ENTRY_CREATED: "price_list_entry.created",
   PRICE_LIST_ENTRY_UPDATED: "price_list_entry.updated",
   PRICE_LIST_ENTRY_CLOSED: "price_list_entry.closed",
+  CUSTOM_FIELD_DEFINITION_CREATED: "custom_field_definition.created",
+  CUSTOM_FIELD_DEFINITION_UPDATED: "custom_field_definition.updated",
+  CUSTOM_FIELD_DEFINITION_DEACTIVATED: "custom_field_definition.deactivated",
+  CUSTOM_FIELD_DEFINITION_ACTIVATED: "custom_field_definition.activated",
+  CUSTOM_FIELD_VALUE_CREATED: "custom_field_value.created",
+  CUSTOM_FIELD_VALUE_UPDATED: "custom_field_value.updated",
 } as const;
