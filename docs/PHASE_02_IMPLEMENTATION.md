@@ -969,9 +969,9 @@ Next.js 16.3.1 security advisory and other Prisma/Next.js-related
 
 P2C.3 introduced **no** external dependency version upgrade. These
 advisories are not claimed to have been introduced by P2C.3, and the
-counts are not claimed to be permanent. Dependency security remediation
-is a **separate required follow-up before deployment/P2D**. No
-dependency or lockfile entry is changed in this cleanup.
+counts are not claimed to be permanent. The Next.js runtime patch was
+completed after P2C.3 landed; see **§20**. Remaining Prisma CLI and
+dev-only findings are still deferred.
 
 ### P2D deferred work
 
@@ -982,6 +982,165 @@ dependency or lockfile entry is changed in this cleanup.
 - Master archival of custom-field targets.
 - Display-specific definition ordering.
 - NUMBER / MULTI_SELECT remain unsupported.
-- Dependency security remediation (see above).
+- Remaining Prisma CLI / dev-only advisories (see §20).
 
-P2C.3 remains **uncommitted**.
+P2C.3 was committed and pushed as
+`33a8566317213ae177d5184c26e7717ad623a7d5`.
+
+## 20. Dependency-security remediation (pre-P2D)
+
+Pre-P2D Next.js runtime security patch only. Prisma remains **7.9.1**.
+No `pnpm` overrides, no audit suppression, no `.npmrc` change, no
+`images.unoptimized`, no `localPatterns`, and no MIME/upload hardening.
+No ADR. P2D was not started.
+
+### Pre-change audit
+
+Timestamp **2026-09-10T20:49:50+08:00** (`pnpm audit --prod`): **10**
+findings, **2** critical, **7** high, **1** moderate.
+
+Timestamp **2026-09-10T20:50:01+08:00** (`pnpm audit`): **13** findings,
+**2** critical, **8** high, **3** moderate.
+
+Direct Next.js critical advisories on `next@16.3.1`:
+
+- `GHSA-p293-qw3h-jr36` — unauthenticated RCE on Windows-hosted servers
+- `GHSA-2xp9-vwfh-vxw4` — unauthenticated RCE in Image Optimization when
+  AVIF files are used
+
+Transitive sharp advisory on `next > sharp@0.35.3`:
+
+- `GHSA-rgj7-g3m4-5g8c` — libheif issues `GHSA-g89c-p67h-r497` and
+  `GHSA-2jg2-4ch7-h545`
+
+### Image-optimizer reachability before upgrade
+
+`next.config.ts` does not set `images.unoptimized`. Middleware matcher
+is `/app/:path*` only, so `/_next/image` is not covered.
+
+On Next.js **16.3.1** at `http://localhost:3000`, unauthenticated
+`GET /_next/image` (missing params, same-origin URL, and remote URL)
+returned **HTTP 400** from the Image Optimization API with security
+headers and **no** sign-in redirect. The optimizer path was therefore
+reachable before the upgrade.
+
+### Change
+
+- `apps/web` `next` **16.3.1 → 16.3.4**
+- transitive `sharp` **0.35.3 → 0.35.4**
+- `@next/env` and `@next/swc-*` **16.3.4**
+- `@img/sharp-*` **0.35.4**; `@img/sharp-libvips-*` **1.3.2 → 1.3.3**
+  (Next 16.3.4 resolution)
+- React **19.2.8**, TypeScript **5.9.3**, Prisma / `@prisma/client` /
+  `@prisma/adapter-pg` **7.9.1** unchanged
+- no override
+
+`pnpm install --frozen-lockfile` succeeded. `pnpm why next --prod`
+shows `next@16.3.4` under `@noahark/web`. `pnpm why sharp --prod`
+shows `sharp@0.35.4` under `next@16.3.4`. Vulnerable `next@16.3.1` and
+`sharp@0.35.3` are absent from the lockfile and the web production
+graph.
+
+### Post-change audit
+
+Timestamp **2026-09-10T20:52:45+08:00** (`pnpm audit --prod`): **7**
+findings, **0** critical, **6** high, **1** moderate.
+
+Timestamp **2026-09-10T20:52:57+08:00** (`pnpm audit`): **10** findings,
+**0** critical, **7** high, **3** moderate.
+
+Removed: `GHSA-p293-qw3h-jr36`, `GHSA-2xp9-vwfh-vxw4`,
+`GHSA-rgj7-g3m4-5g8c`.
+
+These counts are point-in-time. The advisory database can change.
+
+### Remaining production (`pnpm audit --prod`) findings
+
+All seven remain because `@prisma/client@7.9.1` pulls `prisma@7.9.1` into
+the production graph as an optional peer, so `pnpm audit --prod` surfaces
+Prisma **CLI** packages (`@prisma/config`, `mysql2`, `@prisma/dev` /
+`ajv` / `fast-uri`) that are not NoahArk request-path runtime drivers.
+NoahArk uses PostgreSQL via `@prisma/adapter-pg` and `pg`, not `mysql2`.
+P-2 keeps Prisma at 7.9.1; no compatible in-scope bump exists without
+changing Prisma.
+
+| Package        | Advisory              | Severity | Path (prod)                                                             | Class             | Upstream compatible fix outside this patch |
+| -------------- | --------------------- | -------- | ----------------------------------------------------------------------- | ----------------- | ------------------------------------------ |
+| `deepmerge-ts` | `GHSA-ggr8-5vv4-36mx` | high     | `@noahark/db` → `@prisma/client` → `prisma` → `@prisma/config`          | Prisma CLI / peer | `deepmerge-ts` ≥ 8.0.0 via Prisma          |
+| `mysql2`       | `GHSA-3f6p-5ww8-9rcr` | high     | `@noahark/db` → `@prisma/client` → `prisma` → `mysql2`                  | Prisma CLI / peer | `mysql2` ≥ 3.22.0 via Prisma               |
+| `fast-uri`     | `GHSA-5jgf-p345-68v8` | high     | `@noahark/db` → `@prisma/client` → `prisma` → `@prisma/dev` → … → `ajv` | Prisma CLI / peer | `fast-uri` ≥ 3.1.6 via Prisma              |
+| `fast-uri`     | `GHSA-f65p-4m7j-42xc` | high     | same                                                                    | Prisma CLI / peer | `fast-uri` ≥ 3.1.6 via Prisma              |
+| `fast-uri`     | `GHSA-fph4-wmhf-6fwf` | high     | same                                                                    | Prisma CLI / peer | `fast-uri` ≥ 3.1.6 via Prisma              |
+| `fast-uri`     | `GHSA-jqff-g426-hqxp` | high     | same                                                                    | Prisma CLI / peer | `fast-uri` ≥ 3.1.6 via Prisma              |
+| `mysql2`       | `GHSA-rgwj-5xj2-c3m3` | moderate | `@noahark/db` → `@prisma/client` → `prisma` → `mysql2`                  | Prisma CLI / peer | `mysql2` ≥ 3.23.1 via Prisma               |
+
+### Remaining full-audit extra findings (dev-only; deferred)
+
+- `js-yaml` `GHSA-2883-xcg3-v3hh` (high): `@noahark/web` **devDependency**
+  `@apidevtools/swagger-parser`. OpenAPI validation tooling only.
+- `vitest` / `@vitest/mocker` `GHSA-82fw-gwwq-j7x9` (moderate): test
+  runner, patched ≥ 4.1.11. Vitest remains **4.1.10** in this patch.
+- Additional `deepmerge-ts` / `mysql2` / `fast-uri` paths through the
+  direct `packages/db` `prisma` CLI dependency (same Prisma 7.9.1 hold).
+
+### Deployment constraints and deferred hardening
+
+Production hosting is constrained to **Linux**. `GHSA-p293-qw3h-jr36` is
+Windows-hosted; 16.3.4 is still the required runtime patch because it
+also closes the AVIF/image-optimizer advisory and removes the Windows
+RCE from the installed Next.js version.
+
+The repository still lacks an enforced deployable production artifact.
+
+Not changed in this patch (security/P2D backlog):
+
+- unrestricted same-origin image optimizer path
+- undefined `images.localPatterns`
+- middleware not covering `/_next/image`
+- no upload MIME allowlist
+
+### Gates actually run
+
+Node **v24.19.0**, pnpm **11.17.0**.
+
+- Prettier check on the three authorised paths
+- `git diff --check`
+- `pnpm turbo run lint --force` — **16/16** packages
+- `pnpm turbo run typecheck --force` — **16/16** packages
+- `pnpm turbo run test --force` — **15** packages with a test task:
+  `@noahark/core` **23/23**, `@noahark/auth` **42/42**, `@noahark/audit`
+  **28/28**, `@noahark/files` **20/20**, `@noahark/authz` **20/20**,
+  `@noahark/config` **15/15**, `@noahark/workflow` **19/19**,
+  `@noahark/db` **43/43**, `@noahark/custom-fields` **35/35**,
+  `@noahark/catalog` **47/47**, `@noahark/crm` **6/6**, `@noahark/jobs`
+  **15/15**, `@noahark/web` **64/64**, plus `@noahark/notifications` and
+  `@noahark/purchasing` with no unit files (`--passWithNoTests`)
+- `pnpm --filter @noahark/web build` — Next.js **16.3.4**; restored
+  generated `apps/web/next-env.d.ts` (`.next/dev/types` → `.next/types`
+  only)
+- Live error-shape files: `partyDomainErrorMapping.test.ts` (P2002),
+  `pricingDomainEntry.test.ts` / `pricingDomainConcurrency.test.ts`
+  (P2039 / SQLSTATE 23P01), `customFieldDomainErrorMapping.test.ts`
+  (SQLSTATE 23514) — **11/11**
+- P2C.3 `customFieldDomain*` **29/29** (8 files)
+- P2C.2 `pricingDomain*` **14/14** (7 files)
+- P2C.1 `catalogDomain*` **18/18** (6 files)
+- P2B `partyDomain*` **34/34** (9 files)
+- Canonical P2A six-file subset **60/60**
+- Named Phase 1 security/audit/concurrency files (not a documented
+  canonical five-file subset): `security.test.ts`,
+  `temporalSecurityBoundaries.test.ts`, `concurrencyRaces.test.ts`,
+  `auditPagination.test.ts`, `rlsPooledConnection.test.ts` — **44/44**
+- Full `@noahark/web` integration **471/471** (67 files)
+- Phase 1 Playwright E2E `foundation.spec.ts` **18/18**
+- OpenAPI validate; `openapi.yaml` and `packages/db/prisma` unchanged
+
+Live `verifyAuditChain(...).valid === true` in the concurrency/audit
+suites above; sequences remain gapless.
+
+PostgreSQL **18.4** via `embedded-postgres` on disposable databases
+(`SELECT version()` in `customFieldDomainErrorMapping.test.ts`).
+PostgreSQL **16.14 NOT RUN (UNVERIFIED)**. No writes to persistent
+`noahark`. No migrate, reset, seed or deploy.
+
+This slice remains **uncommitted**.
