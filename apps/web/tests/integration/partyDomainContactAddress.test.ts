@@ -3,6 +3,7 @@ import pg from "pg";
 import { verifyAuditChain, type AuditChainLink } from "@noahark/audit";
 import type { AccessContext } from "@noahark/core";
 import { ConflictError, ForbiddenError, ValidationError } from "@noahark/core";
+import { encodeCreatedAtIdCursor } from "@noahark/core";
 import { withTenantContext } from "@noahark/db";
 import {
   archiveParty,
@@ -12,10 +13,12 @@ import {
   createParty,
   getContact,
   listContacts,
+  listAddresses,
+  listAssignments,
   updateContact,
 } from "@noahark/crm";
 import { PENDING_PARTY_CONTACT_PERMISSIONS } from "@noahark/crm";
-import { cleanupTenant, cleanupUser } from "./testHelpers";
+import { cleanupTenant, cleanupUser, setupTestTenant } from "./testHelpers";
 import {
   partyCode,
   setupPartyDomainFixture,
@@ -183,8 +186,8 @@ describe("P2B — contact and address", () => {
     expect(c1.phone).toBeNull();
     const listed = await listContacts(ctxA, created.party.id);
     const detail = await getContact(ctxA, c1.id);
-    expect(listed.find((c) => c.id === c1.id)?.email).toBe(detail.email);
-    expect(listed.find((c) => c.id === c1.id)?.phone).toBe(detail.phone);
+    expect(listed.items.find((c) => c.id === c1.id)?.email).toBe(detail.email);
+    expect(listed.items.find((c) => c.id === c1.id)?.phone).toBe(detail.phone);
 
     const unmaskedCtx = {
       ...ctxA,
@@ -211,7 +214,7 @@ describe("P2B — contact and address", () => {
       ).toBe(true);
     }
     const after = await listContacts(ctxA, created.party.id);
-    expect(after.filter((c) => c.isPrimary)).toHaveLength(1);
+    expect(after.items.filter((c) => c.isPrimary)).toHaveLength(1);
 
     const addr = await createAddress(ctxA, {
       partyId: created.party.id,
@@ -393,5 +396,99 @@ describe("P2B — contact and address", () => {
       ]),
     );
     expect(verifyAuditChain(toAuditLinks(state.events)).valid).toBe(true);
+  });
+
+  it("paginates contacts and addresses by (createdAt, id) and rejects forged cursors", async () => {
+    fixture = await setupPartyDomainFixture();
+    const { ctxA, ctxAB, leA, leB } = fixture;
+    const created = await createParty(ctxA, {
+      ownerLegalEntityId: leA.id,
+      code: partyCode(),
+      partyType: "ORGANISATION",
+      legalName: "Paged Co",
+    });
+    const contacts = [];
+    for (const name of ["A", "B", "C"]) {
+      contacts.push(
+        await createContact(ctxA, {
+          partyId: created.party.id,
+          givenName: name,
+        }),
+      );
+    }
+    await expect(
+      listContacts(ctxA, created.party.id, { cursor: "not-a-cursor" }),
+    ).rejects.toBeInstanceOf(ValidationError);
+
+    const seen = new Set<string>();
+    let cursor: string | null = null;
+    let pages = 0;
+    do {
+      const page = await listContacts(ctxA, created.party.id, {
+        cursor: cursor ?? undefined,
+        limit: 1,
+      });
+      expect(page.items).toHaveLength(1);
+      expect(seen.has(page.items[0]!.id)).toBe(false);
+      seen.add(page.items[0]!.id);
+      cursor = page.nextCursor;
+      pages += 1;
+    } while (cursor);
+    expect(pages).toBe(3);
+    expect(seen.size).toBe(3);
+    const last = await listContacts(ctxA, created.party.id, {
+      cursor: encodeCreatedAtIdCursor(contacts[2]!.createdAt, contacts[2]!.id),
+      limit: 1,
+    });
+    expect(last.items).toEqual([]);
+    expect(last.nextCursor).toBeNull();
+
+    const addresses = [];
+    for (const line of ["1 First", "2 Second", "3 Third"]) {
+      addresses.push(
+        await createAddress(ctxA, {
+          partyId: created.party.id,
+          addressType: "GENERAL",
+          line1: line,
+          countryCode: "SG",
+        }),
+      );
+    }
+    const addrPage = await listAddresses(ctxA, created.party.id, { limit: 2 });
+    expect(addrPage.items).toHaveLength(2);
+    expect(addrPage.nextCursor).toBeTruthy();
+    const addrRest = await listAddresses(ctxA, created.party.id, {
+      cursor: addrPage.nextCursor!,
+      limit: 2,
+    });
+    expect(addrRest.items).toHaveLength(1);
+    expect(addrRest.nextCursor).toBeNull();
+    expect([...addrPage.items, ...addrRest.items].map((a) => a.id).sort()).toEqual(
+      addresses.map((a) => a.id).sort(),
+    );
+
+    await createAssignment(ctxAB, {
+      partyId: created.party.id,
+      legalEntityId: leB.id,
+    });
+    const assignPage = await listAssignments(ctxAB, {
+      partyId: created.party.id,
+      limit: 1,
+    });
+    expect(assignPage.items).toHaveLength(1);
+    expect(assignPage.nextCursor).toBeTruthy();
+
+    const extra = await setupTestTenant();
+    try {
+      const foreignCursor = encodeCreatedAtIdCursor(new Date(), extra.tenantId);
+      const leaked = await listContacts(ctxA, created.party.id, {
+        cursor: foreignCursor,
+        limit: 25,
+      });
+      expect(leaked.items.every((c) => c.tenantId === ctxA.tenantId)).toBe(true);
+    } finally {
+      await cleanupTenant(extra.tenantId).catch(() => undefined);
+      await cleanupUser(extra.adminUserId).catch(() => undefined);
+    }
   });
 });

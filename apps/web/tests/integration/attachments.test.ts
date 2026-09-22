@@ -35,41 +35,13 @@ describe("file upload and attachment access (real Postgres + local storage)", ()
     const provider = new LocalStorageProvider(storageRoot);
     const ctx = await buildContext(setup.adminUserId, setup.tenantId);
 
-    // A minimal-but-real PNG (signature + IHDR chunk header — file-type
-    // needs this much to positively identify the format, not just the
-    // 8-byte signature) with a filename that LIES about the type —
+    // A complete 1x1 PNG with a filename that LIES about the type —
     // sniffMimeType() must trust the bytes, not the client-supplied name.
-    const pngMagic = Buffer.from([
-      0x89,
-      0x50,
-      0x4e,
-      0x47,
-      0x0d,
-      0x0a,
-      0x1a,
-      0x0a, // PNG signature
-      0x00,
-      0x00,
-      0x00,
-      0x0d, // IHDR chunk length
-      0x49,
-      0x48,
-      0x44,
-      0x52, // "IHDR"
-      0x00,
-      0x00,
-      0x00,
-      0x01, // width
-      0x00,
-      0x00,
-      0x00,
-      0x01, // height
-      0x08,
-      0x06,
-      0x00,
-      0x00,
-      0x00, // bit depth / colour type / etc.
-    ]);
+    // Signature-plus-IHDR-only bytes are truncated and are rejected.
+    const pngMagic = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+      "base64",
+    );
 
     const file = await withTenantContext(
       {

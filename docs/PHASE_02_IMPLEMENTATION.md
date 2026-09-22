@@ -1144,3 +1144,735 @@ PostgreSQL **16.14 NOT RUN (UNVERIFIED)**. No writes to persistent
 `noahark`. No migrate, reset, seed or deploy.
 
 This slice remains **uncommitted**.
+
+## 21. P2D.0 — custom-field hardening, catalogue, pagination, files
+
+P2D.0 only. P2D.1–P2D.5 and P2E were not started. No public APIs, OpenAPI
+operations, UI, `tenantRoute`, or idempotency keys were added. `schema.prisma`
+and migrations `00001`–`00004` were not rewritten.
+
+### T-decisions applied
+
+| ID        | Decision                                                                                                                                                                                                                                                                                                                                                   |
+| --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| T-1 / T-2 | `archiveCatalogItem` / `archivePriceList` remain deferred. No services, APIs, permissions, or ADR-85. Phase-2 catalogue is **63** keys, not 65. `catalog_item:archive` and `price_list:archive` are excluded. Partial-scope RLS cannot prove assignment completeness, so an archive of a shared master would be unsafe without a later completeness proof. |
+| T-3       | Tenant-wide grants only in P2D. Entity-scoped-only fail closed — **P2D.1**, not this slice.                                                                                                                                                                                                                                                                |
+| T-4       | ADR-79 D-10 kept: assigned readers do not see owner custom-field values.                                                                                                                                                                                                                                                                                   |
+| T-5       | Database owner-write floor on `party`, `catalog_item`, and `price_list`.                                                                                                                                                                                                                                                                                   |
+| T-6       | Five previously unbounded lists are paginated.                                                                                                                                                                                                                                                                                                             |
+| T-7       | `party_contact:email:read` and `party_contact:phone:read` are catalogued. `tenant_admin` receives every catalogue key via `PERMISSION_CATALOG.map`. `member` stays the original nine Phase-1 keys.                                                                                                                                                         |
+| T-8       | Production permission-catalogue sync. No DAG reversal (`authz` still does not depend on `db`).                                                                                                                                                                                                                                                             |
+| T-9       | Category and UOM stay tenant-wide with no owner column.                                                                                                                                                                                                                                                                                                    |
+| T-10      | Later archive APIs must use `POST .../archive`, never DELETE. Not implemented here.                                                                                                                                                                                                                                                                        |
+| T-11      | Write limiter is P2D.1.                                                                                                                                                                                                                                                                                                                                    |
+| T-12      | Code-declared field policies remain authoritative; `FieldPolicy` table unused.                                                                                                                                                                                                                                                                             |
+| T-13      | Image optimizer hardened with a production-runtime probe. Middleware matcher stays `/app/:path*`.                                                                                                                                                                                                                                                          |
+| T-14      | Byte-authenticated MIME allowlist. OOXML deferred unless ZIP contents are proven.                                                                                                                                                                                                                                                                          |
+| T-15      | Workspace-wide Vitest **4.1.11**. Fourteen package manifests that still pinned 4.1.10 were consolidated in the path-cap cleanup. `@noahark/web` was already 4.1.11 and received no further semantic change. No `pnpm audit --fix`. No Prisma bump.                                                                                                         |
+
+### Permission catalogue (96 keys)
+
+Phase 1 remains 33 keys. Phase 2 adds 63 literal `resource:action` keys
+(party 27, catalog 16, pricing 14, custom fields 6). `authorize()` remains
+exact `Set.has()` with no wildcards. `SYSTEM_ROLES.TENANT_ADMIN.permissions`
+is `PERMISSION_CATALOG.map((p) => p.key)`. `SYSTEM_ROLES.MEMBER.permissions`
+is unchanged: `tenant:read`, `legal_entity:read`, `membership:read`,
+`role:read`, `settings:read`, `approval:submit`, `approval:read`,
+`file:upload`, `file:read`.
+
+### Permission sync
+
+Executable: `apps/web/scripts/syncPermissionCatalogue.ts` (`pnpm --filter
+@noahark/web permissions:sync`). Source of truth is `PERMISSION_CATALOG`,
+not SQL copies of the 63 keys.
+
+Behaviour: upsert every catalogue row into `permission`; backfill missing
+grants onto existing `is_system = true` `tenant_admin` roles only; leave
+`member` and custom roles unchanged; return inserted/updated/unchanged
+counts; fail visibly; run in one owner-role transaction via
+`createSystemClient()` / `DATABASE_MIGRATION_URL`. It does not create demo
+tenants or users and does not use `assertSeedIsAllowed` / `ALLOW_DEMO_SEED`.
+It is not invoked from ordinary requests.
+
+Concurrency (informational; sync service not redesigned here): two
+overlapping sync invocations cannot corrupt or duplicate `permission` or
+`role_permission` rows because `permission.key` and
+`(role_id, permission_id)` are unique and the work runs in one transaction
+that rolls back on error. One racing invocation may still fail visibly
+with a unique-constraint conflict (`23505`). Operators should retry the
+failed run.
+
+DAG: `authz` → `core` only. `db` already depends on `authz`. Putting sync
+inside `authz` would cycle. Authz package-boundary test forbids
+`@noahark/db` imports.
+
+Deploy requirement: run the sync after migrate deploy so existing tenants'
+`tenant_admin` roles receive Phase-2 keys. New tenants created through
+`setupTestTenant` / seed already follow `SYSTEM_ROLES`.
+
+### Migration `20260914000005_p2d0_custom_field_hardening`
+
+Forward-only. Does not rewrite `00001`–`00004`.
+
+**DELETE revoke.** Phase 1 granted `SELECT, INSERT, UPDATE, DELETE` on
+`custom_field_value` and `custom_field_definition` to `noahark_app`. P2D.0
+revokes `DELETE` from `noahark_app`, `noahark_worker`, and `PUBLIC`. A live
+`noahark_app` `DELETE` must fail with SQLSTATE `42501`. No service or API
+delete exists.
+
+**Owner-write floor (T-5).** `custom_field_value_target_integrity()` is
+replaced so the `party`, `catalog_item`, and `price_list` branches require
+`NEW.legal_entity_id = master.owner_legal_entity_id`. The assignment
+`OR EXISTS (...)` alternative is removed from those three branches only.
+`party_contact` still allows owner **or** assignment (parent party).
+Entity-scoped types, demo bypass, typed-value guard, definition
+immutability, tenant matching, and the allowlist are unchanged.
+
+Former squatting exploit (closed): an assigned legal entity B could insert
+a `custom_field_value` against an A-owned `party` / `catalog_item` /
+`price_list` with `legal_entity_id = B` because the trigger treated
+assignment as sufficient. That write now fails SQLSTATE `23514`, inserts
+no row, and writes no audit event. Owner-A writes via production
+`setCustomFieldValue` still succeed. The old trigger is not reinstalled in
+any permanent test.
+
+### Pagination (intentional semantic change)
+
+These five services now return `{ items, nextCursor }` ordered by
+`(createdAt, id)` ascending, default page size 25 (max 100), invalid
+cursor → `VALIDATION_FAILED`. Default is the first page of 25, not all
+rows.
+
+- `listContacts`
+- `listAddresses`
+- `listAssignments`
+- `listCatalogItemAssignments`
+- `listPriceListAssignments`
+
+`listContacts` previously ordered by `isPrimary desc, createdAt asc`; it
+now uses `(createdAt, id)` like the other four.
+
+### Image optimizer
+
+`apps/web/next.config.ts`:
+
+```
+images.unoptimized = true
+images.localPatterns = []
+images.remotePatterns = []
+```
+
+Middleware matcher is unchanged (`/app/:path*`). The `/_next/image` route
+is **not** claimed removed unless a production probe returns 404 or the
+route is absent. Exact probe statuses are recorded under Gates below after
+the production-runtime run against Next.js **16.3.4** (`next start`, not
+only `next dev`).
+
+### MIME allowlist
+
+25 MiB cap unchanged. `sniffMimeType` never trusts client Content-Type,
+filename, or extension. After sniff, `assertAllowedUploadMime` allows only
+PDF, PNG, JPEG, GIF, WebP, `text/plain`, and `text/csv`. HTML, SVG, XML,
+JavaScript, executables, generic archives, OOXML/ZIP, and unknown bytes
+are rejected with the existing `ValidationError`. Contents are not logged.
+OOXML remains deferred until ZIP members can prove DOCX/XLSX/PPTX.
+
+Independent Sonnet P2D.0 audit confirmed a **comment-prefixed SVG MIME
+bypass**: `<!--x--><svg onload=alert(1)>` was classified as `text/plain`
+and accepted because detection used `startsWith("<?xml"|"<svg")` on
+`trimStart()` of the original sample and did not skip HTML/XML comments.
+That bypass is closed. Download `Content-Type: application/octet-stream`
+and `Content-Disposition: attachment` were not changed.
+
+A later focused Sonnet audit returned **FAIL**: the first MIME remediation
+applied `deniedTextPayload()` to every buffer, including PDF/PNG/JPEG/GIF/
+WebP. Raw HTML/event-handler regexes then matched ordinary binary bytes.
+Independent evidence included a `%PDF-1.4` file with `<<...>>` dictionaries
+rejected, JPEG/PNG files with legitimate XMP rejected, and 289 of 300
+valid random-pixel PNG samples rejected. Tiny header fixtures did not
+expose this.
+
+Correction: active-text heuristics run only for `text/plain` and
+`text/csv`, against the complete bounded UTF-8 buffer (not the first 4096
+bytes). Invalid UTF-8 on that path fails closed. Tag-wide event-handler
+regexes were later removed; prose such as `onions = 3` and `online=true`
+is accepted because those strings are not markup. `javascript:` is a
+linear prefix check. Allowlisted binaries are checked with
+narrow structural validators (PDF header + terminal `%%EOF`; PNG chunks
+through IEND; JPEG SOI/markers/EOI; GIF through trailer; WebP
+RIFF/WEBP length and chunks). Truncation and trailing bytes after a
+completed structure are rejected. Filename and client MIME remain
+irrelevant. The attachment integration fixture that used signature-plus-
+IHDR-only PNG bytes had to be replaced with a complete 1×1 PNG; the
+spoofed filename was kept. That extra path is
+`apps/web/tests/integration/attachments.test.ts`.
+
+Limitation (narrowed text grammar, fail-closed): arbitrary JavaScript
+without markup, a shebang, `import`/`export`, or a `function` declaration
+cannot be reliably distinguished from unrestricted plain text. The
+classifier does not claim complete JavaScript detection. Comparison prose
+such as `n < 10` and `a < b` remains eligible for `text/plain`.
+
+A later focused Sonnet audit again returned **FAIL**. Remaining defects
+were quadratic full-buffer tag regexes (`<[a-zA-Z][^>]*?...`) that
+blocked the Node event loop (measured ~4.3s at 96 KB, ~12.4s on another
+payload, ~17s at 192 KB; `file:upload` is on the default member role);
+HTML5 comment-terminator bypasses (`--!>`, `<!-->`, `<!--->`, including
+BOM/whitespace and mid-file forms); and a JPEG parser that stopped after
+the first SOS, rejecting progressive and multi-scan files. Correction:
+a small fixed number of linear O(n) text passes (not one decode-and-scan);
+reject `<` immediately followed by an XML NameStart character, `!`, `?`
+or `/` (so `<!--` and `<_:svg` are markup and comments are not
+stripped); linear `javascript:` prefix check; unsafe C0 other than
+TAB/LF/CR fail closed; JPEG marker walk continues after each entropy
+scan until EOI; PNG requires exactly one first IHDR of length 13 with
+non-zero dimensions, at least one IDAT, IEND length 0; GIF requires at
+least one image descriptor. PNG CRCs remain unchecked. These are
+framing checks, not complete media decoding.
+
+### Dependency advisories (T-15)
+
+Point-in-time `pnpm audit --prod` / `pnpm audit` **before** this slice
+(2026-09-14T14:08:27+08:00):
+
+- prod: **7** findings (0 critical, 6 high, 1 moderate) — Prisma CLI /
+  `mysql2` / `fast-uri` / `deepmerge-ts` via Prisma **7.9.1**
+- full: **10** findings (0 critical, 7 high, 3 moderate) — plus
+  `js-yaml` (`@apidevtools/swagger-parser`) and `vitest` /
+  `@vitest/mocker` `GHSA-82fw-gwwq-j7x9`
+
+After the T-15 path-cap cleanup, every workspace `package.json` that
+declares Vitest pins **4.1.11**. `pnpm-lock.yaml` resolves only
+`vitest@4.1.11` and `@vitest/*@4.1.11` (15 importers). No catalogue or
+lockfile entry still pins 4.1.10.
+
+After workspace-wide **4.1.11**:
+
+- prod: **7** findings (0 critical, 6 high, 1 moderate) — unchanged
+  Prisma **7.9.1** CLI / `mysql2` / `fast-uri` / `deepmerge-ts`
+- full: **8** findings (0 critical, 7 high, 1 moderate) —
+  `GHSA-82fw-gwwq-j7x9` dropped with the 4.1.10 tree. Direct `js-yaml`
+  via swagger-parser remains.
+
+`@apidevtools/swagger-parser` stays `^12.1.0` unless a smallest
+compatible release that drops vulnerable `js-yaml` is confirmed.
+Prisma is not bumped. `pnpm audit --fix` is not used.
+
+### SHA-256 of migrations 00001–00004 (before this slice)
+
+```
+F050BFB3878EDD524B82B4CBF82BA74AD6287FE7E8F8C97CA279C6915C6FA8AF  20260817000001_init/migration.sql
+2FA6C9FCD0428FE84F816BEDD413E47FB7BE66FD3331796F1A8D69DCCEDB78F1  20260817000002_rls_and_constraints/migration.sql
+0F0F5F931869168BEE0EAA7F44D5799882DBBED36F871A6864B65621F113367A  20260824000003_parties_catalog/migration.sql
+443C6559115CBB359576D4095837AC0FBD54DC56FC417203D8C532768F5ED530  20260824000004_p2a_audit_hardening/migration.sql
+```
+
+After hashes and disposable PostgreSQL **18.4** / **16.14** deploys are
+recorded under Gates once those commands have been run.
+
+### Remaining risks
+
+- Direct `js-yaml` `^5.3.0` remains for OpenAPI conformance.
+  `@apidevtools/swagger-parser@12.1.0` has no `js-yaml` of its own; 13.0.0
+  is a major and was not taken.
+- Prisma CLI/dev advisories remain on 7.9.1.
+- Independent Sonnet P2D.0 audit **initial disposition: FAIL** (comment-
+  prefixed SVG MIME bypass, two genuine Prettier defects, system-client
+  caller comment). Later focused audits also returned **FAIL** (binary
+  text-regex false positives; then quadratic tag regexes, HTML5 comment
+  terminators, and progressive JPEG). Remediations are in this working
+  tree. A later three-file delta audit passed. **P2D.0 pre-commit
+  readiness: YES. P2D.1 readiness: YES.** No HIGH or MEDIUM defect
+  remains. P2D.1 implementation has not started.
+- Arbitrary JavaScript without markup / shebang / `import`/`export` /
+  `function` declaration may still sniff as `text/plain`. Download
+  headers remain defense in depth.
+- Permission-catalogue sync: a racing second invocation may fail visibly
+  with unique-constraint `23505`; data is not duplicated. Not redesigned.
+- Sonnet's PostgreSQL execution was blocked by an environmental
+  `ECONNRESET`, not a confirmed product defect.
+- Current working-tree footprint is **44** paths because structural PNG
+  validation required a complete-PNG fixture in
+  `apps/web/tests/integration/attachments.test.ts`.
+- P2D.1+ and P2E are not started. Independent Sonnet later returned
+  P2D.0 pre-commit **YES** and P2D.1 **YES** before this precision
+  cleanup; P2D.1 implementation has still not started.
+
+### Gates
+
+Node **v24.19.0**, pnpm **11.17.0**, Prisma **7.9.1**.
+
+00001–00004 SHA-256 **after** this slice (byte-identical to before):
+
+```
+F050BFB3878EDD524B82B4CBF82BA74AD6287FE7E8F8C97CA279C6915C6FA8AF  20260817000001_init/migration.sql
+2FA6C9FCD0428FE84F816BEDD413E47FB7BE66FD3331796F1A8D69DCCEDB78F1  20260817000002_rls_and_constraints/migration.sql
+0F0F5F931869168BEE0EAA7F44D5799882DBBED36F871A6864B65621F113367A  20260824000003_parties_catalog/migration.sql
+443C6559115CBB359576D4095837AC0FBD54DC56FC417203D8C532768F5ED530  20260824000004_p2a_audit_hardening/migration.sql
+```
+
+- Workspace-wide Vitest **4.1.11** (fourteen manifests 4.1.10 → 4.1.11;
+  `@noahark/web` already 4.1.11). Lockfile delta is Vitest specifier /
+  resolution only. `pnpm install --frozen-lockfile` succeeded. Repo
+  search: no `package.json` or lockfile pin of 4.1.10 remains.
+- Prisma format / validate / generate (`schema.prisma` unchanged)
+- Prettier on the P2D.0 footprint (SQL has no Prettier parser)
+- `git diff --check` on the footprint
+- `pnpm turbo run lint --force` — **16/16**
+- `pnpm turbo run typecheck --force` — **16/16**
+- `pnpm turbo run test --force` — 15 packages with a test task:
+  `@noahark/core` **23/23**, `@noahark/auth` **42/42**, `@noahark/audit`
+  **28/28**, `@noahark/files` **25/25**, `@noahark/authz` **26/26**,
+  `@noahark/config` **15/15**, `@noahark/workflow` **19/19**,
+  `@noahark/db` **43/43**, `@noahark/custom-fields` **35/35**,
+  `@noahark/catalog` **47/47**, `@noahark/crm` **6/6**, `@noahark/jobs`
+  **15/15**, `@noahark/web` **64/64**, plus `@noahark/notifications` and
+  `@noahark/purchasing` (`--passWithNoTests`)
+- Fresh deploy of 00001–00005 on disposable PostgreSQL **18.4**; second
+  deploy idle
+- Upgrade deploy: 00001–00004 then 00005 then second deploy, proven in
+  `permissionCatalogueSync.test.ts`
+- `noahark_app` `DELETE` on custom-field tables → SQLSTATE **42501**
+- Assigned-entity insert on `party` / `catalog_item` / `price_list` →
+  SQLSTATE **23514**, no row, no audit; owner `setCustomFieldValue` still
+  succeeds
+- Full `@noahark/web` integration on PostgreSQL **18.4**: **482/482**
+  (69 files). Named subsets in that run: P2A six-file **61/61**
+  (`customFieldTargetIntegrity` 13), partyDomain **35/35**, catalogDomain
+  **19/19**, pricingDomain **15/15**, customFieldDomain **31/31**
+- Production build Next.js **16.3.4**; image optimizer probes against
+  `next start`: local **404**, remote **404**, query-string local **404**,
+  unsupported quality **404**. None returned an optimized image or a
+  sign-in redirect. Middleware matcher unchanged. `next-env.d.ts` restored
+  to HEAD after the build rewrote `.next/dev/types` → `.next/types`
+- Playwright `foundation.spec.ts` **18/18** (Chromium missing in the
+  sandbox cache on the first attempt; environmental, then installed)
+- OpenAPI validate; `openapi.yaml` byte-identical to HEAD; no new routes
+- Live `verifyAuditChain` inside the passing concurrency/audit files
+- Relevant concurrency files included once in the 482 (not repeated 5×)
+- `pnpm audit --prod` after T-15 cleanup: **7** (0 critical, 6 high, 1
+  moderate)
+- `pnpm audit` after T-15 cleanup: **8** (0 critical, 7 high, 1 moderate)
+- `customFieldDomainErrorMapping.test.ts` environment assertion is now
+  `/PostgreSQL (16\.14|18\.4)/`. Error-mapping assertions unchanged.
+  File **1/1** on PostgreSQL **18.4** and **1/1** on PostgreSQL **16.14**.
+- PostgreSQL **16.14** via `embedded-postgres@16.14.0-beta.17` in TEMP on
+  port 55433, then `pg_ctl -m fast` stopped: full `@noahark/web`
+  integration **482/482** (69 files). Nothing listening on 55433
+  afterward. Cluster default encoding remains WIN1252 (environmental).
+- Full `@noahark/web` integration on PostgreSQL **18.4** was not re-run
+  in the T-15 cleanup: web was already on Vitest 4.1.11 (**482/482**
+  earlier this slice); the workspace-wide runner bump was proven by
+  `pnpm turbo run test --force` (all packages **v4.1.11**) plus the
+  mapping file **1/1** on 18.4. No unit or mapping regression.
+- No writes to persistent `noahark`. No commit, push, or P2D.1.
+
+### Initial gate failures
+
+1. Empty-catalogue sync test expected 63 inserts on a database that also
+   lacked Phase-1 keys (received 96). Fixed to insert whatever catalogue
+   rows are missing, then prove a second run is idempotent.
+2. `assertAllowedUploadMime` accepted empty `text/plain`. Empty buffers
+   are now sniffed as `application/octet-stream` and rejected.
+3. Authz typecheck: `Set.has` of excluded archive strings vs
+   `PermissionKey`. Widened the set to `Set<string>`.
+4. Web typecheck: `SYSTEM_ROLES.MEMBER.permissions[0]` possibly undefined.
+   Replaced with `PERMISSIONS.TENANT_READ`.
+5. ESLint `preserve-caught-error` on the sync wrapper and image-probe
+   startup; unused `lastCursor` assignment. Fixed.
+6. Playwright **18/18** first run failed because Chromium was not in the
+   sandbox cache (`playwright install chromium` then **18/18**).
+7. PostgreSQL **16.14** full suite **481/482** because
+   `customFieldDomainErrorMapping.test.ts` pinned 18.4 only. Corrected
+   in the T-15 path-cap cleanup to `/PostgreSQL (16\.14|18\.4)/` without
+   weakening error-mapping assertions; re-run **482/482**.
+8. Prettier `--check` on Windows reports CRLF vs LF for
+   `packages/crm/package.json`, `packages/purchasing/package.json`,
+   `imageOptimizerRuntime.test.ts`, and this document. Package manifests
+   were not reformatted (T-15: version pin only). SQL has no Prettier
+   parser. `git diff --check` flagged an extra blank line at EOF on this
+   document before the cleanup edit.
+
+This slice remains **uncommitted** and **unstaged**.
+
+### Independent Sonnet P2D.0 audit (initial FAIL; remediation in this tree)
+
+Independent Sonnet initial disposition: **FAIL**. P2D.1 was not started.
+
+Confirmed medium: comment-prefixed SVG (`<!--x--><svg onload=alert(1)>`)
+bypassed the byte allowlist as `text/plain`. Download
+`application/octet-stream` + `attachment` mitigated inline rendering of a
+stored file but did not stop the upload. `mimeSniff.ts` now skips BOM,
+whitespace, and HTML/XML comments before classification and rejects the
+active-content cases listed under MIME allowlist. Adversarial coverage is
+in `mimeAllowlist.unit.test.ts`. Filename and client MIME remain
+irrelevant.
+
+Confirmed lows:
+
+1. Genuine Prettier defects in
+   `apps/web/tests/integration/imageOptimizerRuntime.test.ts` (mis-indented
+   `catch` in `beforeAll`) and `docs/PHASE_02_IMPLEMENTATION.md`. A later
+   default Prettier `--check` (no `--end-of-line` override) still failed
+   on CRLF in `packages/crm/package.json` and
+   `packages/purchasing/package.json`. Those two manifests were then
+   written with the repository Prettier command so they use LF; the only
+   semantic change remains `"vitest": "4.1.10"` → `"vitest": "4.1.11"`.
+2. `packages/db/src/systemClient.ts` documentation comment omitted the
+   permission-catalogue synchronization command from permitted owner-client
+   callers. Comment only; no executable, export, client, or authorization
+   change.
+
+Informational: concurrent permission-sync executions cannot corrupt or
+duplicate rows (unique constraints + transaction rollback); one racer may
+fail visibly with `23505`. Sync service not redesigned.
+
+Sonnet's PostgreSQL run was blocked by environmental `ECONNRESET`, not a
+confirmed product defect.
+
+`apps/web/next-env.d.ts` was a Sonnet-generated extra path and was
+restored to HEAD. The newly authorised P2D.0 path is
+`packages/db/src/systemClient.ts` (comment). After the SVG MIME
+remediation the footprint was **43** paths. The focused binary
+regression then required one extra existing test path,
+`apps/web/tests/integration/attachments.test.ts` (complete 1×1 PNG
+fixture; spoofed filename unchanged). Current footprint is **44**
+paths. No final Sonnet PASS is claimed. P2D.1 remains not started.
+
+Remediation gates (this pass):
+
+- Default Prettier `--check` on the 43-path footprint (SQL/lockfile
+  excluded) initially **exit 1** on CRLF in `packages/crm/package.json`
+  and `packages/purchasing/package.json`. Those two files were then
+  normalized with `prettier --write` (no `--end-of-line` override). Final
+  default Prettier `--check` **exit 0**. `--end-of-line auto` is not the
+  final gate.
+- `git diff --check` **exit 0**
+- `@noahark/files` lint / typecheck **exit 0**
+- `pnpm turbo run lint --force` **16/16**
+- `pnpm turbo run typecheck --force` **16/16**
+- `@noahark/files` unit **37/37** (17 MIME allowlist tests). Adversarial
+  MIME file **17/17** × **5** consecutive runs
+- `pnpm turbo run test --force` — 15 packages with a test task; files
+  **37/37**, authz **26/26**, web unit **64/64**
+- File upload/download integration (`attachments` + `signedFileDelivery`)
+  **18/18** on disposable PostgreSQL **18.4**
+- Full `@noahark/web` integration on PostgreSQL **18.4**: **482/482**
+  (69 files), disposable `noahark_test_integration_*`, dropped after
+- Full `@noahark/web` integration on PostgreSQL **16.14**
+  (`SELECT version()` = `PostgreSQL 16.14, compiled by Visual C++ build
+1944, 64-bit`) via `embedded-postgres@16.14.0-beta.17` in TEMP on port
+  **55433**: **482/482** (69 files), disposable DB dropped, then
+  `pg_ctl -m fast` stop. Nothing listening on **55433** afterward.
+  Encoding WIN1252 (environmental). Persistent `noahark` on **55432**
+  was not written.
+- Production build not re-run: `images.unoptimized` / empty
+  `localPatterns` / `remotePatterns` unchanged; download headers
+  unchanged. `imageOptimizerRuntime.test.ts` remains `skipIf` without
+  `.next/BUILD_ID`.
+- OpenAPI validate; `openapi.yaml` git hash identical to HEAD
+  (`a49a31ab92759ba6763972cb154b2b47f4436896`); no `apps/web/app` diff
+- `pnpm audit --prod`: **7** (0 critical, 6 high, 1 moderate)
+- `pnpm audit`: **8** (0 critical, 7 high, 1 moderate)
+- Migrations 00001–00004 SHA-256 unchanged; `schema.prisma` unchanged;
+  download route still `Content-Type: application/octet-stream` and
+  `Content-Disposition: attachment`
+- Staging empty. Uncommitted.
+
+Remediation initial failures (preserved):
+
+1. Default Prettier `--check` **exit 1** on CRLF-only
+   `packages/crm/package.json` and `packages/purchasing/package.json`.
+   Those two manifests were later `prettier --write`'d (LF per committed
+   config). Final default Prettier `--check` **exit 0**. `--end-of-line
+auto` is not the final gate.
+2. Short-signature unit test failed: `file-type` labelled a 4-byte PNG
+   magic as `image/png` and the allowlist accepted it. Truncation floor
+   added (`MIN_COMPLETE_BYTES`). A 3-byte ASCII `GIF` payload is genuine
+   `text/plain` and was removed from that test. Re-run **37/37**.
+
+### Focused Sonnet MIME binary-regression audit (FAIL; this pass)
+
+Independent focused Sonnet audit: **FAIL**. P2D.1 was not started. No
+final Sonnet PASS is claimed.
+
+HIGH: `assertAllowedUploadMime` ran `deniedTextPayload()` on every
+buffer. PDF dictionaries (`<<...>>`), JPEG/PNG XMP, and 289 of 300
+valid random-pixel PNG samples were rejected. Tiny header fixtures did
+not expose this. Text heuristics now run only for `text/plain` and
+`text/csv` against the complete bounded UTF-8 buffer. Allowlisted
+binaries use format-aware structural checks (PDF header + terminal
+`%%EOF`; PNG chunks through IEND; JPEG SOI/markers/EOI; GIF through
+trailer; WebP RIFF length and chunks). Truncation and trailing bytes
+are rejected. Filename and client MIME remain ignored. Contents are
+not logged.
+
+LOW A: the event-handler tag regex was removed with the quadratic
+scanner. `onions = 3` and `online=true` remain accepted because they
+are not markup (`<` followed by a NameStart / `!` / `?` / `/`).
+
+LOW B: accepted text is inspected in full (not the first 4096 bytes).
+Invalid UTF-8 on the text path fails closed. Binary formats are not
+decoded as text.
+
+LOW: `imageOptimizerRuntime.test.ts` now spawns `process.execPath` plus
+the resolved Next CLI with `shell: false`, keeps the server process
+handle, and terminates the Windows PID tree (`taskkill /PID /T`, then
+`/F` after a graceful deadline). It waits until the selected port is
+closed. It does not use `taskkill /IM node.exe`. Production image
+configuration was not changed.
+
+Limitation: arbitrary JavaScript without markup, a shebang,
+`import`/`export`, or a `function` declaration is outside this
+classifier’s reliable scope.
+
+Extra path (required): `apps/web/tests/integration/attachments.test.ts`
+used a 29-byte signature-plus-IHDR PNG. Structural PNG validation
+correctly rejects that truncation. The fixture is now the same complete
+1×1 PNG already used in unit tests; the lying filename is unchanged.
+
+Focused-pass gates:
+
+- Default Prettier `--check` on the P2D.0 footprint (SQL/lockfile
+  excluded) **exit 0**. `--end-of-line auto` is not the final gate.
+- `git diff --check` **exit 0**
+- `pnpm install --frozen-lockfile` **exit 0**
+- `@noahark/files` lint / typecheck **exit 0**; `@noahark/web` lint /
+  typecheck **exit 0**
+- `@noahark/files` unit **46/46** (26 MIME allowlist tests). MIME file
+  **26/26** × **5** consecutive runs
+- `pnpm turbo run test --force` — 15 packages with a test task,
+  including files **46/46** (PostgreSQL 18.4 on 55432 was restarted
+  first after an `ECONNREFUSED` on `@noahark/db` provision-roles)
+- File upload/download integration (`attachments` + `signedFileDelivery`)
+  initially **17/18** on the truncated PNG fixture; after the complete
+  1×1 PNG fixture **18/18** on disposable PostgreSQL **18.4**
+- Image-optimizer runtime test **1/1** × **5** consecutive runs against
+  existing `.next/BUILD_ID`. Server became reachable; all four
+  `/_next/image` probes returned **404**; selected port closed after
+  every run. No leftover listener attributable to the test.
+- Full `@noahark/web` integration on PostgreSQL **18.4**: initially
+  **481/482** (truncated PNG fixture), then **482/482** (69 files)
+  after the fixture change. Disposable `noahark_test_integration_*`,
+  dropped after. Persistent `noahark` was not written.
+- Full `@noahark/web` integration on PostgreSQL **16.14**
+  (`SELECT version()` = `PostgreSQL 16.14, compiled by Visual C++ build
+1944, 64-bit`) via `embedded-postgres@16.14.0-beta.17` in TEMP on
+  port **55433**: first run **481/482** (`pricingDomainConcurrency`
+  overlap flake, unrelated to MIME). Isolated retry of that file
+  **7/7**. Full re-run **482/482** (69 files). Disposable DB dropped,
+  then `pg_ctl -m fast` stop. Nothing listening on **55433**
+  afterward (`ECONNREFUSED`). Encoding WIN1252 (environmental).
+- Production build not re-run: MIME lives in `@noahark/files` runtime
+  and does not change the Next image graph. `images.unoptimized` /
+  empty `localPatterns` / `remotePatterns` unchanged. Download headers
+  unchanged (`application/octet-stream` + `attachment`).
+  `apps/web/next-env.d.ts` remains clean vs HEAD.
+- OpenAPI validate; `openapi.yaml` git hash identical to HEAD
+  (`a49a31ab92759ba6763972cb154b2b47f4436896`); `schema.prisma`
+  unchanged; migrations 00001–00004 SHA-256 unchanged
+- `pnpm audit --prod`: **7** (0 critical, 6 high, 1 moderate)
+- `pnpm audit`: **8** (0 critical, 7 high, 1 moderate)
+- Staging empty. Uncommitted. P2D.1 not started.
+
+Focused-pass initial failures (preserved):
+
+1. `files` typecheck TS18048 on JPEG marker/next and GIF block size
+   (`noUncheckedIndexedAccess`). Added undefined guards. Re-run
+   typecheck **exit 0**.
+2. GIF comment fixture used a block size that included the terminator.
+   Corrected to `21 FE 04 "noah" 00`.
+3. `a < b` classified as `application/xml` because `TAG_ANYWHERE`
+   allowed whitespace after `<`. The pattern now requires a tag-like
+   character immediately after `<`.
+4. ASCII `"GIF89a"` / `"RIFF"` strings were accepted as `text/plain`.
+   Truncation tests now use binary slices of real files.
+5. `pnpm turbo run test --force` failed `@noahark/db`
+   `provision-roles.live.test` with `ECONNREFUSED 127.0.0.1:55432`
+   because PostgreSQL 18.4 was down. Restarted
+   `packages/db/scripts/embedded-pg.mjs start`; workspace unit then
+   **15/15**.
+6. Attachment integration and first full PostgreSQL **18.4** suite
+   **481/482**: `attachments.test.ts` still uploaded a truncated PNG.
+   Extra path updated to a complete 1×1 PNG. Re-run attachments
+   **18/18**, full 18.4 **482/482**.
+7. First PostgreSQL **16.14** full suite **481/482** on
+   `pricingDomainConcurrency` (`A price for this item already covers
+part of that period`). MIME-unrelated flake. Isolated retry **7/7**;
+   full re-run **482/482**.
+8. Default Prettier `--check` **exit 1** on
+   `docs/PHASE_02_IMPLEMENTATION.md` after the focused-pass §21
+   append (wrap). `prettier --write` (no `--end-of-line` override)
+   then default `--check` **exit 0**.
+
+### Focused Sonnet MIME linearity / JPEG audit (FAIL; this pass)
+
+Independent focused Sonnet audit: **FAIL**. The original binary
+false-positive HIGH is closed. P2D.1 was not started. No final Sonnet
+PASS is claimed.
+
+HIGH: `EVENT_HANDLER_IN_TAG` and `JAVASCRIPT_ATTR` used
+`<[a-zA-Z][^>]*?...` against the full 25 MiB-capped buffer. Independent
+reproduction: ~4.3s at 96 KB, ~12.4s on another payload, ~17s at 192 KB,
+approximately quadratic. `file:upload` is available to the default
+member role, so this blocked the single Node event loop for every
+tenant. Unbounded tag regexes and HTML/XML comment stripping are
+removed. Accepted text is decoded with UTF-8 fatal and inspected with
+a small fixed number of linear O(n) passes. A `<` immediately followed
+by an XML NameStart character, `!`, `?` or `/` is rejected, including
+comment openers and namespace-prefixed names. Comparison prose
+(`a < b`, `Cost is < 10 SGD`) remains accepted. `javascript:` is a
+linear prefix check. Unsafe C0 other than TAB/LF/CR fails closed.
+
+MEDIUM: HTML5 comment-terminator bypasses
+(`<!--c--!><svg...>`, `<!-->`, `<!--->`, BOM/whitespace and mid-file
+forms) were accepted because comment stripping used `-->` only. The
+linear markup-start rule rejects `<!--` immediately, so comment-closing
+interpretation is irrelevant. Permanent tests cover those variants.
+
+MEDIUM: the JPEG parser stopped after the first SOS (`return false` /
+outer `break`), so 100/100 progressive JPEGs and mozjpeg/optimiseScans
+output were rejected. It now returns to marker parsing after each
+entropy-coded scan, honours `0xFF00` stuffing, restart markers
+`0xFFD0–0xFFD7`, and fill `0xFF` bytes, requires EOI, and rejects
+truncation, invalid lengths, trailing bytes and concatenated second
+images. Baseline, progressive, multi-scan, EXIF, XMP, ICC and COM
+are accepted. It does not search for the first `FFD9`.
+
+LOW: PNG now requires exactly one first IHDR of length 13, non-zero
+width/height, at least one IDAT, IEND length 0, and no bytes after
+IEND. Duplicate IHDR is rejected. Chunk CRC values are **not**
+verified. GIF requires at least one image descriptor; colour tables,
+extensions and sub-blocks remain traversed. WebP/PDF framing checks
+are unchanged and still reject trailing payloads. These are bounded
+structural/framing checks, not complete media decoding.
+
+LOW: image-optimizer cleanup checks `exitCode === null` and
+`signalCode === null` before `taskkill /PID /T` of the spawned child
+only. Never `/IM node.exe`.
+
+Orphan `next start` processes from pre-fix test runs were re-queried
+before stop. All six reported PIDs were still present and verified as
+NoahArk `next start` on 127.0.0.1 ports 56913 / 49747 / 58755 (not a
+developer `next dev`, not PostgreSQL 55432):
+
+- 36076 (pnpm wrapper) / 9456 (`next` CLI) — port 56913
+- 6556 / 34032 — port 49747
+- 32640 / 29868 — port 58755
+
+Those exact trees were stopped with `taskkill /PID /T /F`. Duplicate
+child `/PID` calls then reported not found because `/T` had already
+reaped them. Ports 56913 / 49747 / 58755 were closed afterward.
+PostgreSQL 18.4 on 55432 remained listening.
+
+Footprint remains **44** paths. `attachments.test.ts` was not further
+modified.
+
+Linearity / JPEG-pass gates:
+
+- Default Prettier `--check` on the P2D.0 footprint (SQL/lockfile
+  excluded) initially **exit 1** on `mimeSniff.ts` and
+  `mimeAllowlist.unit.test.ts` (wrap). `prettier --write` then
+  default `--check` **exit 0**. `--end-of-line auto` is not the final
+  gate.
+- `git diff --check` **exit 0**
+- `pnpm install --frozen-lockfile` **exit 0**
+- `@noahark/files` lint / typecheck **exit 0**; `@noahark/web` lint /
+  typecheck **exit 0**
+- `@noahark/files` unit **53/53** (33 MIME allowlist tests). MIME file
+  **33/33** × **5** consecutive runs
+- External linearity (same incomplete-tag shapes): 96 KB **3.1 ms**,
+  192 KB **1.1 ms**, 1 MB **4.1 ms**; all `ValidationError`
+- External binaries: **300/300** valid random-pixel PNGs; baseline,
+  progressive and multi-scan JPEG; EXIF/XMP/ICC JPEG; PNG iTXt;
+  GIF comment; static and animated WebP; PDF dictionaries/XMP
+- `pnpm turbo run test --force` — 15 packages, files **53/53**
+- File upload/download integration **18/18** on disposable PostgreSQL
+  **18.4**
+- Image-optimizer runtime **1/1** × **5**; `/_next/image` probes
+  **404**; selected port closed after every run
+- Full `@noahark/web` integration on PostgreSQL **18.4**: **482/482**
+  (69 files). Disposable DB dropped. Persistent `noahark` not written.
+- PostgreSQL **16.14** was not re-run (no database code in this pass).
+  Previously verified **482/482**. Port **55433** remains closed.
+- Production build not re-run: MIME is `@noahark/files` runtime; Next
+  image graph and download headers unchanged. `next-env.d.ts` clean.
+- OpenAPI validate; `openapi.yaml` hash identical to HEAD
+  (`a49a31ab92759ba6763972cb154b2b47f4436896`); `schema.prisma`
+  unchanged; migrations 00001–00004 SHA-256 unchanged
+- `pnpm audit --prod`: **7** (0 critical, 6 high, 1 moderate)
+- `pnpm audit`: **8** (0 critical, 7 high, 1 moderate)
+- Staging empty. Uncommitted. P2D.1 not started.
+
+Linearity / JPEG-pass initial failures (preserved):
+
+1. C0-control test expected `text/csv` for a TAB-delimited sample
+   with no comma. Fixture corrected to a CSV that also contains TAB,
+   LF and CR. Re-run MIME **33/33**.
+2. Default Prettier `--check` **exit 1** on `mimeSniff.ts` and
+   `mimeAllowlist.unit.test.ts`. `prettier --write` then **exit 0**.
+3. First orphan `taskkill` loop used PowerShell `$PID` (reserved).
+   Re-issued as explicit `/PID` values after command-line verification.
+
+### Focused Sonnet LOW precision cleanup (namespace-prefixed markup)
+
+Independent Sonnet, after the linearity/JPEG pass, returned **P2D.0
+pre-commit YES** and **P2D.1 YES**, with no HIGH or MEDIUM findings.
+The subsequent namespace-prefixed markup cleanup was then
+independently re-audited as a three-file delta.
+
+LOW: `<_:svg xmlns:_="http://www.w3.org/2000/svg" onload="alert(1)"/>`
+was accepted as `text/plain` because markup-start allowed only ASCII
+letters, `!`, `?` and `/`. The linear scanner now also rejects `_`,
+`:`, and non-ASCII XML 1.0 NameStart characters after `<`, including
+supplementary-plane pairs in `U+10000`–`U+EFFFF`. Comparison prose
+(`a < b`, `Cost is < 10 SGD`, `2 < 3`) remains accepted. Regex-based
+comment stripping and wildcard tag regexes were not restored. Binary
+validators are unchanged. PNG CRCs remain unchecked.
+
+A permanent unit test forces a complete-buffer scan of a >512 KiB
+benign comparison-prose payload (many `<` followed by space) with a 5 s
+timeout so an accidental return to quadratic scanning would fail, without
+a sub-millisecond assertion.
+
+Decoding/scanning uses a small fixed number of linear passes over the
+bounded buffer. Total complexity remains O(n), not a single
+decode-and-scan.
+
+Accepted deferred LOW risks until P2D.1:
+
+- approximately 0.7–1.0 seconds of synchronous processing for a
+  maximum-size 24–25 MiB text upload, until the P2D.1 write limiter;
+- `permissionCatalogueSync.test.ts` temporarily parking migration 00005
+  remains a test-harness hard-kill hazard and is deferred. The test was
+  not modified.
+
+Precision-cleanup gates:
+
+- Default Prettier `--check` on the P2D.0 footprint **exit 0**
+- `git diff --check` **exit 0**
+- `@noahark/files` lint / typecheck **exit 0**
+- `@noahark/files` unit **56/56** (36 MIME allowlist tests). MIME file
+  **36/36** × **5**
+- External namespace-prefixed SVG probes rejected (`_:svg`, `x:svg`,
+  `_foo`, `:bar`, Greek NameStart). Comparison prose accepted. 1 MiB
+  benign full-scan **67.1 ms**. Progressive JPEG, PNG and PDF
+  dictionaries still accepted.
+- OpenAPI hash identical to HEAD
+  (`a49a31ab92759ba6763972cb154b2b47f4436896`); `schema.prisma`
+  unchanged. Staging empty. Footprint **44** paths.
+- No database or full integration re-run at cleanup time. P2D.1 not
+  started.
+
+Final independent Sonnet three-file delta audit: **passed**. P2D.0
+pre-commit readiness: **YES**. P2D.1 readiness: **YES**. No HIGH or
+MEDIUM defect remains. Namespace/Unicode differential sweep tested
+**1,112,032** code points with **zero** mismatches. Named-payload
+matrix **79/79**. Files unit **56/56**. MIME test **36/36** on five
+consecutive runs. Previously verified PostgreSQL **18.4** integration
+remains **482/482**. Previously verified PostgreSQL **16.14**
+integration remains **482/482**. Accepted LOW risks remain: ~0.7–1.0 s
+synchronous CPU for a maximum-size text upload pending the P2D.1 write
+limiter; `permissionCatalogueSync.test.ts` temporarily parks migration
+00005 and could leave it displaced after a hard kill; PNG CRC
+validation remains out of scope. P2D.1 has not started.

@@ -3,7 +3,7 @@ import { authorize, PERMISSIONS } from "@noahark/authz";
 import { type AccessContext, NotFoundError, ValidationError } from "@noahark/core";
 import type { TransactionClient } from "@noahark/db";
 import type { StorageProvider } from "./storageProvider";
-import { sniffMimeType } from "./mimeSniff";
+import { assertAllowedUploadMime, sniffMimeType } from "./mimeSniff";
 
 const MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024; // 25 MiB — Phase 1 foundation default
 
@@ -49,6 +49,7 @@ export async function uploadFile(
   }
 
   const mimeType = await sniffMimeType(input.buffer);
+  assertAllowedUploadMime(mimeType, input.buffer);
   const sha256 = createHash("sha256").update(input.buffer).digest("hex");
   const safeName = sanitizeFilename(input.originalFilename);
   const storageKey = `tenant/${ctx.tenantId}/${input.legalEntityId ?? "shared"}/${randomUUID()}-${safeName}`;
@@ -266,6 +267,7 @@ export async function replaceFileContent(
   }
 
   const mimeType = await sniffMimeType(input.buffer);
+  assertAllowedUploadMime(mimeType, input.buffer);
   const sha256 = createHash("sha256").update(input.buffer).digest("hex");
   const safeName = sanitizeFilename(file.originalFilename);
   const storageKey = `tenant/${ctx.tenantId}/${file.legalEntityId ?? "shared"}/${randomUUID()}-${safeName}`;

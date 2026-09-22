@@ -3,7 +3,10 @@ import { PrismaClient } from "./generated/prisma/client";
 
 /**
  * Owner-role connection (DATABASE_MIGRATION_URL) — bypasses RLS entirely.
- * ONLY for migrations, prisma/seed.ts, and integration-test fixture setup.
+ * ONLY for migrations, prisma/seed.ts, the permission-catalogue
+ * synchronization command (`pnpm --filter @noahark/web permissions:sync` /
+ * `apps/web/scripts/syncPermissionCatalogue.ts`), and integration-test
+ * fixture setup.
  * Never import this from apps/web request-handling code.
  *
  * Memoized (like client.ts's getAppClient() / workerClient.ts's

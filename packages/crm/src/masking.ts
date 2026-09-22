@@ -3,9 +3,10 @@ import { maskProtectedFields } from "@noahark/authz";
 import type { AccessContext } from "@noahark/core";
 
 /**
- * Declared P2D permission keys. They are NOT in the Phase 1 catalogue and
- * are not seeded. Until P2D adds them to PERMISSIONS / SYSTEM_ROLES, no
- * production role holds them — email/phone stay masked (fail-closed).
+ * Party-contact field-policy keys (T-7 / T-12). The strings match the
+ * P2D.0 catalogue. `tenant_admin` receives them via PERMISSION_CATALOG;
+ * `member` and custom roles do not, so email/phone stay masked unless
+ * those roles are granted the keys.
  */
 export const PENDING_PARTY_CONTACT_PERMISSIONS = {
   EMAIL_READ: "party_contact:email:read",

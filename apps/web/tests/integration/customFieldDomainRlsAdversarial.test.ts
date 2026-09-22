@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { NotFoundError } from "@noahark/core";
 import {
@@ -10,6 +11,8 @@ import {
 import * as customFieldDomain from "../../lib/services/customFieldDomain";
 import { cleanupTenant, cleanupUser } from "./testHelpers";
 import {
+  createAssignedCatalogGraph,
+  createAssignedPartyGraph,
   createStringDefinition,
   createTestParty,
   fieldKey,
@@ -148,5 +151,68 @@ describe("P2C.3 — custom-field RLS adversarial probes", () => {
     await expect(
       getCustomFieldDefinition(fixture.ctxA, "does-not-exist"),
     ).rejects.toBeInstanceOf(NotFoundError);
+  });
+
+  it("refuses DELETE on custom-field tables for noahark_app (SQLSTATE 42501)", async () => {
+    fixture = await setupCustomFieldDomainFixture();
+    const { ctxA, leA } = fixture;
+    const party = await createTestParty(ctxA, leA.id);
+    const definition = await createStringDefinition(ctxA, "party");
+    const value = await setStringValue(ctxA, definition.id, party.party.id, "keep");
+    const denied = await asApp(ctxA.tenantId, [leA.id], async (c) => {
+      const codes: string[] = [];
+      for (const [sql, id] of [
+        ["DELETE FROM custom_field_value WHERE id = $1", value.id],
+        ["DELETE FROM custom_field_definition WHERE id = $1", definition.id],
+      ] as const) {
+        try {
+          await c.query(sql, [id]);
+          codes.push("ALLOWED");
+        } catch (e) {
+          codes.push((e as { code?: string }).code ?? "UNKNOWN");
+        }
+      }
+      return codes;
+    });
+    expect(denied).toEqual(["42501", "42501"]);
+    expect(await getCustomFieldValue(ctxA, value.id)).toMatchObject({ id: value.id });
+  });
+
+  it("keeps owner writes working and rejects assigned-entity raw inserts on shared masters", async () => {
+    fixture = await setupCustomFieldDomainFixture();
+    const { ctxAB, ctxA, leA, leB } = fixture;
+    const parties = await createAssignedPartyGraph(ctxAB, leA.id, leB.id);
+    const catalog = await createAssignedCatalogGraph(ctxAB, leA.id, leB.id);
+    const cases = [
+      { entityType: "party", entityId: parties.party.id },
+      { entityType: "catalog_item", entityId: catalog.item.id },
+      { entityType: "price_list", entityId: catalog.priceList.id },
+    ] as const;
+    for (const t of cases) {
+      const definition = await createStringDefinition(ctxA, t.entityType);
+      const owner = await setStringValue(ctxA, definition.id, t.entityId, "owner");
+      expect(owner.legalEntityId).toBe(leA.id);
+      const stolen = await asApp(ctxA.tenantId, [leB.id], async (c) => {
+        try {
+          await c.query(
+            `INSERT INTO custom_field_value (
+               id, tenant_id, legal_entity_id, definition_id, entity_type, entity_id, value_text
+             ) VALUES ($1,$2,$3,$4,$5,$6,'squat')`,
+            [
+              randomUUID(),
+              ctxA.tenantId,
+              leB.id,
+              definition.id,
+              t.entityType,
+              t.entityId,
+            ],
+          );
+          return "allowed";
+        } catch (e) {
+          return (e as { code?: string }).code ?? "UNKNOWN";
+        }
+      });
+      expect(stolen).toBe("23514");
+    }
   });
 });

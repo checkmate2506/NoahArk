@@ -75,6 +75,11 @@ const securityHeaders = [
 const nextConfig: NextConfig = {
   reactStrictMode: true,
   typescript: { ignoreBuildErrors: false },
+  images: {
+    unoptimized: true,
+    localPatterns: [],
+    remotePatterns: [],
+  },
   // Server-only packages that touch native/Node-specific APIs (pg driver,
   // argon2 bindings) must not be bundled for the client.
   serverExternalPackages: ["@node-rs/argon2", "pg"],

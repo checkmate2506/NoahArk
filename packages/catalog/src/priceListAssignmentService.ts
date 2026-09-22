@@ -9,6 +9,9 @@ import {
 } from "@noahark/core";
 import {
   assertHasLegalEntityAccess,
+  boundPageSize,
+  decodeCreatedAtIdCursor,
+  encodeCreatedAtIdCursor,
   requireExpectedVersion,
   requireNonEmptyLegalEntityScope,
   tenantContextInput,
@@ -66,6 +69,8 @@ export async function getPriceListAssignment(ctx: AccessContext, assignmentId: s
 
 export async function listPriceListAssignments(ctx: AccessContext, raw: unknown = {}) {
   const input = parseOrThrow(ListPriceListAssignmentsSchema, raw);
+  const limit = boundPageSize(input.limit);
+  const cursor = input.cursor ? decodeCreatedAtIdCursor(input.cursor) : null;
   requireNonEmptyLegalEntityScope(ctx);
   if (input.legalEntityId) {
     assertHasLegalEntityAccess(ctx, input.legalEntityId);
@@ -73,16 +78,33 @@ export async function listPriceListAssignments(ctx: AccessContext, raw: unknown 
   const entityFilter = input.legalEntityId
     ? [input.legalEntityId]
     : Array.from(ctx.legalEntityIds);
-  return withTenantContext(tenantContextInput(ctx), (tx) =>
-    tx.priceListLegalEntityAssignment.findMany({
+  return withTenantContext(tenantContextInput(ctx), async (tx) => {
+    const rows = await tx.priceListLegalEntityAssignment.findMany({
       where: {
         tenantId: ctx.tenantId,
         legalEntityId: { in: entityFilter },
         ...(input.priceListId ? { priceListId: input.priceListId } : {}),
+        ...(cursor
+          ? {
+              OR: [
+                { createdAt: { gt: cursor.createdAt } },
+                { createdAt: cursor.createdAt, id: { gt: cursor.id } },
+              ],
+            }
+          : {}),
       },
-      orderBy: { createdAt: "asc" },
-    }),
-  );
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+      take: limit + 1,
+    });
+    const hasMore = rows.length > limit;
+    const page = hasMore ? rows.slice(0, limit) : rows;
+    const last = page[page.length - 1];
+    return {
+      items: page,
+      nextCursor:
+        hasMore && last ? encodeCreatedAtIdCursor(last.createdAt, last.id) : null,
+    };
+  });
 }
 
 export async function createPriceListAssignment(ctx: AccessContext, raw: unknown) {

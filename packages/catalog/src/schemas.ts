@@ -98,4 +98,6 @@ export const UpdateCatalogItemAssignmentSchema = z.object({
 export const ListCatalogItemAssignmentsSchema = z.object({
   catalogItemId: z.string().min(1).max(64).optional(),
   legalEntityId: z.string().min(1).max(64).optional(),
+  cursor: z.string().min(1).optional(),
+  limit: z.number().int().optional(),
 });

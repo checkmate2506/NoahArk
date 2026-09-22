@@ -173,6 +173,7 @@ describe("Phase 2A — custom-field allowlist and target integrity", () => {
     db: ReturnType<typeof createSystemClient>,
     tenantId: string,
     ownerId: string,
+    alsoAssign?: string,
   ) {
     const uom = await db.unitOfMeasure.create({
       data: { tenantId, code: code("EA"), name: "Each" },
@@ -190,6 +191,11 @@ describe("Phase 2A — custom-field allowlist and target integrity", () => {
     const itemAssign = await db.catalogItemLegalEntityAssignment.create({
       data: { tenantId, catalogItemId: item.id, legalEntityId: ownerId },
     });
+    if (alsoAssign) {
+      await db.catalogItemLegalEntityAssignment.create({
+        data: { tenantId, catalogItemId: item.id, legalEntityId: alsoAssign },
+      });
+    }
     const list = await db.priceList.create({
       data: {
         tenantId,
@@ -202,6 +208,11 @@ describe("Phase 2A — custom-field allowlist and target integrity", () => {
     const listAssign = await db.priceListLegalEntityAssignment.create({
       data: { tenantId, priceListId: list.id, legalEntityId: ownerId },
     });
+    if (alsoAssign) {
+      await db.priceListLegalEntityAssignment.create({
+        data: { tenantId, priceListId: list.id, legalEntityId: alsoAssign },
+      });
+    }
     return { item, itemAssign, list, listAssign };
   }
 
@@ -599,5 +610,66 @@ describe("Phase 2A — custom-field allowlist and target integrity", () => {
         expect(["23514", "42501"]).toContain(codeVal);
       }
     });
+  });
+
+  it("assigned-entity writes on party, catalog_item and price_list fail closed (T-5)", async () => {
+    const { db, s, leA, leB } = await tenantPair();
+    const parties = await partyGraph(db, s.tenantId, leA.id, leB.id);
+    const catalog = await catalogGraph(db, s.tenantId, leA.id, leB.id);
+    const cases = [
+      { entityType: "party", entityId: parties.party.id },
+      { entityType: "catalog_item", entityId: catalog.item.id },
+      { entityType: "price_list", entityId: catalog.list.id },
+    ] as const;
+
+    for (const t of cases) {
+      const def = await db.customFieldDefinition.create({
+        data: {
+          tenantId: s.tenantId,
+          entityType: t.entityType,
+          key: code("k"),
+          label: "K",
+          dataType: "STRING",
+        },
+      });
+      const auditsBefore = await db.auditEvent.count({
+        where: { tenantId: s.tenantId },
+      });
+      const valuesBefore = await db.customFieldValue.count({
+        where: { definitionId: def.id },
+      });
+      const state = await asApp(s.tenantId, [leB.id], async (c) => {
+        try {
+          await c.query(
+            `INSERT INTO custom_field_value
+               (id, tenant_id, legal_entity_id, definition_id, entity_type, entity_id, value_text, version, created_at, updated_at)
+             VALUES ($1,$2,$3,$4,$5,$6,'squat',1,now(),now())`,
+            [code("v"), s.tenantId, leB.id, def.id, t.entityType, t.entityId],
+          );
+          return "OK";
+        } catch (e) {
+          return sqlstate(e);
+        }
+      });
+      expect(state, t.entityType).toBe("23514");
+      expect(await db.customFieldValue.count({ where: { definitionId: def.id } })).toBe(
+        valuesBefore,
+      );
+      expect(await db.auditEvent.count({ where: { tenantId: s.tenantId } })).toBe(
+        auditsBefore,
+      );
+
+      const owner = await db.customFieldValue.create({
+        data: {
+          tenantId: s.tenantId,
+          legalEntityId: leA.id,
+          definitionId: def.id,
+          entityType: t.entityType,
+          entityId: t.entityId,
+          valueText: "owner",
+        },
+      });
+      expect(owner.legalEntityId).toBe(leA.id);
+    }
   });
 });

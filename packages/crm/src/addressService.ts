@@ -5,6 +5,9 @@ import {
   NotFoundError,
   StaleVersionError,
   ValidationError,
+  boundPageSize,
+  decodeCreatedAtIdCursor,
+  encodeCreatedAtIdCursor,
   omitUndefined,
   type AccessContext,
 } from "@noahark/core";
@@ -31,6 +34,11 @@ export const CreateAddressSchema = z.object({
   region: z.string().trim().min(1).max(100).optional(),
   postalCode: z.string().trim().min(1).max(20).optional(),
   countryCode: z.string().regex(COUNTRY_SHAPE),
+});
+
+export const ListAddressesSchema = z.object({
+  cursor: z.string().min(1).optional(),
+  limit: z.number().int().optional(),
 });
 
 export const UpdateAddressSchema = z.object({
@@ -120,17 +128,44 @@ export async function getAddress(ctx: AccessContext, addressId: string) {
   });
 }
 
-export async function listAddresses(ctx: AccessContext, partyId: string) {
+export async function listAddresses(
+  ctx: AccessContext,
+  partyId: string,
+  raw: unknown = {},
+) {
+  const input = parseOrThrow(ListAddressesSchema, raw);
+  const limit = boundPageSize(input.limit);
+  const cursor = input.cursor ? decodeCreatedAtIdCursor(input.cursor) : null;
   requireNonEmptyLegalEntityScope(ctx);
   return withTenantContext(tenantContextInput(ctx), async (tx) => {
     const party = await tx.party.findFirst({
       where: { id: partyId, tenantId: ctx.tenantId },
     });
     if (!party) throw new NotFoundError("Party");
-    return tx.partyAddress.findMany({
-      where: { tenantId: ctx.tenantId, partyId },
-      orderBy: { createdAt: "asc" },
+    const rows = await tx.partyAddress.findMany({
+      where: {
+        tenantId: ctx.tenantId,
+        partyId,
+        ...(cursor
+          ? {
+              OR: [
+                { createdAt: { gt: cursor.createdAt } },
+                { createdAt: cursor.createdAt, id: { gt: cursor.id } },
+              ],
+            }
+          : {}),
+      },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+      take: limit + 1,
     });
+    const hasMore = rows.length > limit;
+    const page = hasMore ? rows.slice(0, limit) : rows;
+    const last = page[page.length - 1];
+    return {
+      items: page,
+      nextCursor:
+        hasMore && last ? encodeCreatedAtIdCursor(last.createdAt, last.id) : null,
+    };
   });
 }
 

@@ -86,7 +86,7 @@ describe("P2C.2 — price list assignments", () => {
     const listed = await listPriceListAssignments(ctxAB, {
       priceListId: onlyA.priceList.id,
     });
-    expect(listed.length).toBeGreaterThanOrEqual(3);
+    expect(listed.items.length).toBeGreaterThanOrEqual(3);
 
     await expect(getPriceListAssignment(ctxA, extended.id)).rejects.toBeInstanceOf(
       NotFoundError,
@@ -154,5 +154,43 @@ describe("P2C.2 — price list assignments", () => {
     expect(
       Object.keys(await import("@noahark/catalog")).filter((k) => k.startsWith("delete")),
     ).toEqual([]);
+  });
+
+  it("paginates price list assignments and rejects invalid cursors", async () => {
+    fixture = await setupPricingDomainFixture();
+    const { ctxA, ctxAB, leA, leB, leC } = fixture;
+    const onlyA = await createTestPriceList(ctxA, leA.id);
+    await createPriceListAssignment(ctxAB, {
+      priceListId: onlyA.priceList.id,
+      legalEntityId: leB.id,
+    });
+    await createPriceListAssignment(ctxAB, {
+      priceListId: onlyA.priceList.id,
+      legalEntityId: leC.id,
+    });
+    await expect(
+      listPriceListAssignments(ctxAB, {
+        priceListId: onlyA.priceList.id,
+        cursor: "not-valid",
+      }),
+    ).rejects.toBeInstanceOf(ValidationError);
+    const seen = new Set<string>();
+    let cursor: string | undefined;
+    do {
+      const page = await listPriceListAssignments(ctxAB, {
+        priceListId: onlyA.priceList.id,
+        cursor,
+        limit: 1,
+      });
+      for (const row of page.items) {
+        expect(seen.has(row.id)).toBe(false);
+        seen.add(row.id);
+      }
+      cursor = page.nextCursor ?? undefined;
+      if (!page.nextCursor) {
+        expect(page.nextCursor).toBeNull();
+      }
+    } while (cursor);
+    expect(seen.size).toBeGreaterThanOrEqual(3);
   });
 });

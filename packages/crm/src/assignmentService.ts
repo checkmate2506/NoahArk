@@ -6,6 +6,9 @@ import {
   NotFoundError,
   StaleVersionError,
   ValidationError,
+  boundPageSize,
+  decodeCreatedAtIdCursor,
+  encodeCreatedAtIdCursor,
   type AccessContext,
 } from "@noahark/core";
 import { withTenantContext } from "@noahark/db";
@@ -27,6 +30,13 @@ export const CreateAssignmentSchema = z.object({
 export const UpdateAssignmentSchema = z.object({
   expectedVersion: z.number().int().min(1),
   status: z.enum(["ACTIVE", "SUSPENDED"]),
+});
+
+export const ListAssignmentsSchema = z.object({
+  partyId: z.string().min(1).max(64).optional(),
+  legalEntityId: z.string().min(1).max(64).optional(),
+  cursor: z.string().min(1).optional(),
+  limit: z.number().int().optional(),
 });
 
 function parseOrThrow<T>(schema: z.ZodType<T>, input: unknown): T {
@@ -54,10 +64,10 @@ export async function getAssignment(ctx: AccessContext, assignmentId: string) {
   });
 }
 
-export async function listAssignments(
-  ctx: AccessContext,
-  input: { partyId?: string; legalEntityId?: string } = {},
-) {
+export async function listAssignments(ctx: AccessContext, raw: unknown = {}) {
+  const input = parseOrThrow(ListAssignmentsSchema, raw);
+  const limit = boundPageSize(input.limit);
+  const cursor = input.cursor ? decodeCreatedAtIdCursor(input.cursor) : null;
   requireNonEmptyLegalEntityScope(ctx);
   if (input.legalEntityId) {
     assertHasLegalEntityAccess(ctx, input.legalEntityId);
@@ -65,16 +75,33 @@ export async function listAssignments(
   const entityFilter = input.legalEntityId
     ? [input.legalEntityId]
     : Array.from(ctx.legalEntityIds);
-  return withTenantContext(tenantContextInput(ctx), (tx) =>
-    tx.partyLegalEntityAssignment.findMany({
+  return withTenantContext(tenantContextInput(ctx), async (tx) => {
+    const rows = await tx.partyLegalEntityAssignment.findMany({
       where: {
         tenantId: ctx.tenantId,
         legalEntityId: { in: entityFilter },
         ...(input.partyId ? { partyId: input.partyId } : {}),
+        ...(cursor
+          ? {
+              OR: [
+                { createdAt: { gt: cursor.createdAt } },
+                { createdAt: cursor.createdAt, id: { gt: cursor.id } },
+              ],
+            }
+          : {}),
       },
-      orderBy: { createdAt: "asc" },
-    }),
-  );
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+      take: limit + 1,
+    });
+    const hasMore = rows.length > limit;
+    const page = hasMore ? rows.slice(0, limit) : rows;
+    const last = page[page.length - 1];
+    return {
+      items: page,
+      nextCursor:
+        hasMore && last ? encodeCreatedAtIdCursor(last.createdAt, last.id) : null,
+    };
+  });
 }
 
 export async function createAssignment(ctx: AccessContext, raw: unknown) {

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { ConflictError, NotFoundError } from "@noahark/core";
+import { ConflictError, NotFoundError, ValidationError } from "@noahark/core";
 import { createSystemClient } from "@noahark/db/system";
 import {
   archiveCatalogItemAssignment,
@@ -73,7 +73,7 @@ describe("P2C.1 — catalog item assignments", () => {
     const listed = await listCatalogItemAssignments(ctxAB, {
       catalogItemId: created.item.id,
     });
-    expect(listed.length).toBeGreaterThanOrEqual(3);
+    expect(listed.items.length).toBeGreaterThanOrEqual(3);
 
     const archivedC = await archiveCatalogItemAssignment(
       ctxAB,
@@ -191,5 +191,54 @@ describe("P2C.1 — catalog item assignments", () => {
       },
     });
     expect(extendAudit?.legalEntityId).toBe(leC.id);
+  });
+
+  it("paginates catalog item assignments and rejects invalid cursors", async () => {
+    fixture = await setupCatalogDomainFixture();
+    const { ctxA, ctxAB, leA, leB, leC } = fixture;
+    const uom = await createTestUom(ctxA);
+    const created = await createCatalogItem(ctxA, {
+      ownerLegalEntityId: leA.id,
+      code: catalogCode("SKU"),
+      itemType: "PRODUCT",
+      name: "Paged item",
+      baseUomId: uom.id,
+    });
+    await createCatalogItemAssignment(ctxAB, {
+      catalogItemId: created.item.id,
+      legalEntityId: leB.id,
+    });
+    await createCatalogItemAssignment(ctxAB, {
+      catalogItemId: created.item.id,
+      legalEntityId: leC.id,
+    });
+    await expect(
+      listCatalogItemAssignments(ctxAB, {
+        catalogItemId: created.item.id,
+        cursor: "%%%",
+      }),
+    ).rejects.toBeInstanceOf(ValidationError);
+    const first = await listCatalogItemAssignments(ctxAB, {
+      catalogItemId: created.item.id,
+      limit: 1,
+    });
+    expect(first.items).toHaveLength(1);
+    expect(first.nextCursor).toBeTruthy();
+    const ids = new Set(first.items.map((row) => row.id));
+    let cursor = first.nextCursor;
+    while (cursor) {
+      const page = await listCatalogItemAssignments(ctxAB, {
+        catalogItemId: created.item.id,
+        cursor,
+        limit: 1,
+      });
+      for (const row of page.items) {
+        expect(ids.has(row.id)).toBe(false);
+        ids.add(row.id);
+      }
+      cursor = page.nextCursor;
+    }
+    expect(ids.size).toBeGreaterThanOrEqual(3);
+    expect([...ids].every((id) => first.items[0] && typeof id === "string")).toBe(true);
   });
 });

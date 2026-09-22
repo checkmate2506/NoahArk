@@ -5,6 +5,9 @@ import {
   NotFoundError,
   StaleVersionError,
   ValidationError,
+  boundPageSize,
+  decodeCreatedAtIdCursor,
+  encodeCreatedAtIdCursor,
   omitUndefined,
   type AccessContext,
 } from "@noahark/core";
@@ -30,6 +33,11 @@ export const CreateContactSchema = z.object({
   email: z.string().trim().max(320).optional(),
   phone: z.string().trim().max(40).optional(),
   isPrimary: z.boolean().optional(),
+});
+
+export const ListContactsSchema = z.object({
+  cursor: z.string().min(1).optional(),
+  limit: z.number().int().optional(),
 });
 
 export const UpdateContactSchema = z.object({
@@ -153,18 +161,44 @@ export async function getContact(ctx: AccessContext, contactId: string) {
   });
 }
 
-export async function listContacts(ctx: AccessContext, partyId: string) {
+export async function listContacts(
+  ctx: AccessContext,
+  partyId: string,
+  raw: unknown = {},
+) {
+  const input = parseOrThrow(ListContactsSchema, raw);
+  const limit = boundPageSize(input.limit);
+  const cursor = input.cursor ? decodeCreatedAtIdCursor(input.cursor) : null;
   requireNonEmptyLegalEntityScope(ctx);
   return withTenantContext(tenantContextInput(ctx), async (tx) => {
     const party = await tx.party.findFirst({
       where: { id: partyId, tenantId: ctx.tenantId },
     });
     if (!party) throw new NotFoundError("Party");
-    const contacts = await tx.partyContact.findMany({
-      where: { tenantId: ctx.tenantId, partyId },
-      orderBy: [{ isPrimary: "desc" }, { createdAt: "asc" }],
+    const rows = await tx.partyContact.findMany({
+      where: {
+        tenantId: ctx.tenantId,
+        partyId,
+        ...(cursor
+          ? {
+              OR: [
+                { createdAt: { gt: cursor.createdAt } },
+                { createdAt: cursor.createdAt, id: { gt: cursor.id } },
+              ],
+            }
+          : {}),
+      },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+      take: limit + 1,
     });
-    return contacts.map((c) => maskPartyContact(ctx, c, party.ownerLegalEntityId));
+    const hasMore = rows.length > limit;
+    const page = hasMore ? rows.slice(0, limit) : rows;
+    const last = page[page.length - 1];
+    return {
+      items: page.map((c) => maskPartyContact(ctx, c, party.ownerLegalEntityId)),
+      nextCursor:
+        hasMore && last ? encodeCreatedAtIdCursor(last.createdAt, last.id) : null,
+    };
   });
 }
 

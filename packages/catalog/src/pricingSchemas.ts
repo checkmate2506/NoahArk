@@ -59,6 +59,8 @@ export const UpdatePriceListAssignmentSchema = z.object({
 export const ListPriceListAssignmentsSchema = z.object({
   priceListId: z.string().min(1).max(64).optional(),
   legalEntityId: z.string().min(1).max(64).optional(),
+  cursor: z.string().min(1).optional(),
+  limit: z.number().int().optional(),
 });
 
 export const SetDefaultPriceListSchema = z

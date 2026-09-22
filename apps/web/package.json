@@ -13,7 +13,8 @@
     "test": "vitest run --project unit --passWithNoTests",
     "test:integration": "vitest run --project integration",
     "e2e": "playwright test",
-    "openapi:validate": "tsx scripts/validateOpenApi.ts"
+    "openapi:validate": "tsx scripts/validateOpenApi.ts",
+    "permissions:sync": "tsx scripts/syncPermissionCatalogue.ts"
   },
   "dependencies": {
     "@noahark/audit": "workspace:*",
@@ -51,6 +52,6 @@
     "tailwindcss": "4.3.3",
     "tsx": "4.23.12",
     "typescript": "5.9.3",
-    "vitest": "4.1.10"
+    "vitest": "4.1.11"
   }
 }

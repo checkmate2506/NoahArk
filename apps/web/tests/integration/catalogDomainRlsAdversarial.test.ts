@@ -96,7 +96,7 @@ describe("P2C.1 — catalog RLS adversarial probes", () => {
 
     expect(
       await listCatalogItemAssignments(ctxA, { catalogItemId: hidden.item.id }),
-    ).toEqual([]);
+    ).toEqual({ items: [], nextCursor: null });
 
     const visible = await createCatalogItem(ctxA, {
       ownerLegalEntityId: leA.id,

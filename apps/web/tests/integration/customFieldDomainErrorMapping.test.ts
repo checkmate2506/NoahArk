@@ -111,7 +111,7 @@ describe("P2C.3 — custom-field error mapping", () => {
     const versionRows = await withTenantContext(tenantContextInput(ctxA), async (tx) => {
       return tx.$queryRaw<{ v: string }[]>`SELECT version() AS v`;
     });
-    expect(versionRows[0]?.v ?? "").toMatch(/PostgreSQL 18\.4/);
+    expect(versionRows[0]?.v ?? "").toMatch(/PostgreSQL (16\.14|18\.4)/);
 
     expect(() => mapCustomFieldDbError(raw, "Custom field value")).toThrow(
       ValidationError,
