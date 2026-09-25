@@ -75,7 +75,7 @@ const RETENTION_MS = 24 * 60 * 60_000;
 type RateLimitDimension = "EMAIL" | "IP" | "MFA_ACCOUNT" | "MFA_IP";
 
 function hashKey(value: string): string {
-  return createHash("sha256").update(value).digest("hex");
+  return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
 function normalizeEmail(email: string): string {
@@ -363,6 +363,239 @@ export async function cleanupExpiredBuckets(now: number = Date.now()): Promise<n
   return result.count;
 }
 
+// ---------------------------------------------------------------------------
+// T-11 (P2D.1): shared API write limiter on the same AuthRateLimitBucket
+// table. Logical dimensions are named constants. The PostgreSQL enum
+// `RateLimitDimension` is closed at EMAIL | IP | MFA_ACCOUNT | MFA_IP and
+// P2D.1 is forbidden from shipping a schema/migration change, so the
+// logical names are encoded in the hashed key and stored under existing
+// physical carriers that authentication never uses for these prefixes.
+// ---------------------------------------------------------------------------
+
+export const API_WRITE_TENANT_USER = "API_WRITE_TENANT_USER";
+export const API_WRITE_TENANT = "API_WRITE_TENANT";
+export const API_WRITE_WINDOW_MS = 60_000;
+export const API_WRITE_MAX_PER_TENANT_USER = 120;
+export const API_WRITE_MAX_PER_TENANT = 1_200;
+
+export type ApiWriteDimension = typeof API_WRITE_TENANT_USER | typeof API_WRITE_TENANT;
+
+export interface ApiWriteRateLimitPolicy {
+  tenantUserMax: number;
+  tenantMax: number;
+  windowMs: number;
+}
+
+export const DEFAULT_API_WRITE_RATE_LIMIT_POLICY: ApiWriteRateLimitPolicy = {
+  tenantUserMax: API_WRITE_MAX_PER_TENANT_USER,
+  tenantMax: API_WRITE_MAX_PER_TENANT,
+  windowMs: API_WRITE_WINDOW_MS,
+};
+
+/**
+ * Physical carriers on the closed PostgreSQL enum. Documented schema
+ * constraint only — logical dimensions live in the hashed canonical key,
+ * not as enum values, until a later approved migration.
+ */
+const API_WRITE_PHYSICAL_DIMENSION: Record<
+  ApiWriteDimension,
+  "EMAIL" | "IP" | "MFA_ACCOUNT" | "MFA_IP"
+> = {
+  [API_WRITE_TENANT_USER]: "EMAIL",
+  [API_WRITE_TENANT]: "IP",
+};
+
+const PRISMA_INFRASTRUCTURE_CODES = new Set([
+  "P1001",
+  "P1002",
+  "P1008",
+  "P1017",
+  "P2024",
+]);
+
+const NETWORK_INFRASTRUCTURE_CODES = new Set([
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "ETIMEDOUT",
+  "ENOTFOUND",
+  "EPIPE",
+  "EAI_AGAIN",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+]);
+
+type IdentityQueryClient = {
+  $queryRaw: (query: TemplateStringsArray, ...values: unknown[]) => Promise<unknown>;
+};
+
+function apiWriteWindowStart(now: number, windowMs: number): Date {
+  return new Date(Math.floor(now / windowMs) * windowMs);
+}
+
+/**
+ * Canonical JSON of a fixed array. The logical dimension is part of the
+ * encoded value so delimiter-containing identifiers cannot collide.
+ */
+export function apiWriteCanonicalKey(
+  dimension: ApiWriteDimension,
+  tenantId: string,
+  userId?: string,
+): string {
+  if (dimension === API_WRITE_TENANT_USER) {
+    if (typeof userId !== "string") {
+      throw new Error("API write tenant-user key requires a user id");
+    }
+    return JSON.stringify([API_WRITE_TENANT_USER, tenantId, userId]);
+  }
+  return JSON.stringify([API_WRITE_TENANT, tenantId]);
+}
+
+function asAttemptCount(value: unknown): number {
+  if (typeof value === "bigint") {
+    const n = Number(value);
+    if (!Number.isSafeInteger(n)) {
+      throw new Error("rate limiter increment returned a non-integer count");
+    }
+    return n;
+  }
+  if (typeof value === "number" && Number.isInteger(value)) return value;
+  throw new Error("rate limiter increment returned a non-integer count");
+}
+
+function assertApiWritePolicy(policy: ApiWriteRateLimitPolicy): void {
+  if (!Number.isInteger(policy.tenantUserMax) || policy.tenantUserMax < 1) {
+    throw new Error("API write limiter tenantUserMax must be a positive integer");
+  }
+  if (!Number.isInteger(policy.tenantMax) || policy.tenantMax < 1) {
+    throw new Error("API write limiter tenantMax must be a positive integer");
+  }
+  if (!Number.isInteger(policy.windowMs) || policy.windowMs < 1) {
+    throw new Error("API write limiter windowMs must be a positive integer");
+  }
+}
+
+function infrastructureErrorCode(error: object): string | undefined {
+  const rec = error as { code?: unknown; errorCode?: unknown };
+  if (typeof rec.code === "string" && rec.code.length > 0) return rec.code;
+  if (typeof rec.errorCode === "string" && rec.errorCode.length > 0) {
+    return rec.errorCode;
+  }
+  return undefined;
+}
+
+/**
+ * Fail-open is only for recognised connectivity/availability failures.
+ * Invalid counts, programming errors, SQL mistakes, TypeError, and unknown
+ * errors must propagate.
+ */
+function isLimiterInfrastructureError(error: unknown): boolean {
+  const seen = new Set<unknown>();
+  let current: unknown = error;
+  while (current != null && !seen.has(current)) {
+    seen.add(current);
+    if (typeof current !== "object") return false;
+    const code = infrastructureErrorCode(current);
+    if (code !== undefined) {
+      if (PRISMA_INFRASTRUCTURE_CODES.has(code)) return true;
+      if (NETWORK_INFRASTRUCTURE_CODES.has(code)) return true;
+    }
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
+function logInfrastructureFailure(error: unknown): void {
+  const code =
+    error !== null && typeof error === "object"
+      ? infrastructureErrorCode(error)
+      : undefined;
+  const name = error instanceof Error ? error.name : "unknown";
+  console.error(
+    "[rateLimiter] consumeApiWriteAllowance infrastructure failure — failing OPEN",
+    { name, code },
+  );
+}
+
+async function incrementApiWriteBucket(
+  tx: IdentityQueryClient,
+  logicalDimension: ApiWriteDimension,
+  canonicalKey: string,
+  windowStart: Date,
+): Promise<number> {
+  const keyHash = hashKey(canonicalKey);
+  const physical = API_WRITE_PHYSICAL_DIMENSION[logicalDimension];
+  const rows = (await tx.$queryRaw`
+    INSERT INTO "auth_rate_limit_bucket" ("id", "dimension", "key_hash", "window_start", "attempt_count", "updated_at")
+    VALUES (gen_random_uuid()::text, ${physical}::"RateLimitDimension", ${keyHash}, ${windowStart}, 1, now())
+    ON CONFLICT ("dimension", "key_hash", "window_start")
+    DO UPDATE SET "attempt_count" = "auth_rate_limit_bucket"."attempt_count" + 1, "updated_at" = now()
+    RETURNING "attempt_count"
+  `) as Array<{ attempt_count: unknown }>;
+  return asAttemptCount(rows[0]?.attempt_count);
+}
+
+export interface ConsumeApiWriteAllowanceInput {
+  tenantId: string;
+  userId: string;
+}
+
+export interface ConsumeApiWriteAllowanceOptions {
+  now?: number;
+  policy?: ApiWriteRateLimitPolicy;
+}
+
+export type ConsumeApiWriteAllowanceResult = "ok" | "limited";
+
+/**
+ * Consume one write against both API write dimensions in a single identity
+ * `$transaction` (tenant-user, then tenant). Returns `"limited"` when either
+ * bucket is exhausted — that is a policy decision, never an infrastructure
+ * failure. Only recognised connectivity/availability errors fail OPEN.
+ */
+export async function consumeApiWriteAllowance(
+  input: ConsumeApiWriteAllowanceInput,
+  options: ConsumeApiWriteAllowanceOptions = {},
+): Promise<ConsumeApiWriteAllowanceResult> {
+  const now = options.now ?? Date.now();
+  const policy = options.policy ?? DEFAULT_API_WRITE_RATE_LIMIT_POLICY;
+  assertApiWritePolicy(policy);
+  const windowStart = apiWriteWindowStart(now, policy.windowMs);
+  const userKey = apiWriteCanonicalKey(
+    API_WRITE_TENANT_USER,
+    input.tenantId,
+    input.userId,
+  );
+  const tenantKey = apiWriteCanonicalKey(API_WRITE_TENANT, input.tenantId);
+  try {
+    const db = getIdentityClient();
+    return await db.$transaction(async (tx) => {
+      const client = tx as unknown as IdentityQueryClient;
+      const userCount = await incrementApiWriteBucket(
+        client,
+        API_WRITE_TENANT_USER,
+        userKey,
+        windowStart,
+      );
+      const tenantCount = await incrementApiWriteBucket(
+        client,
+        API_WRITE_TENANT,
+        tenantKey,
+        windowStart,
+      );
+      if (userCount > policy.tenantUserMax || tenantCount > policy.tenantMax) {
+        return "limited";
+      }
+      return "ok";
+    });
+  } catch (e) {
+    if (isLimiterInfrastructureError(e)) {
+      logInfrastructureFailure(e);
+      return "ok";
+    }
+    throw e;
+  }
+}
+
 export {
   trustedProxyCountFromEnv,
   normalizeIp,
@@ -374,4 +607,6 @@ export {
   MAX_ATTEMPTS_PER_MFA_ACCOUNT,
   MAX_ATTEMPTS_PER_MFA_IP,
   RETENTION_MS,
+  apiWriteWindowStart,
+  API_WRITE_PHYSICAL_DIMENSION,
 };

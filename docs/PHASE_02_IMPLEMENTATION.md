@@ -1876,3 +1876,297 @@ synchronous CPU for a maximum-size text upload pending the P2D.1 write
 limiter; `permissionCatalogueSync.test.ts` temporarily parks migration
 00005 and could leave it displaced after a hard kill; PNG CRC
 validation remains out of scope. P2D.1 has not started.
+
+### P2D.1 — API and authorization foundation
+
+P2D.1 only. Zero business endpoints. Zero OpenAPI operations. Zero UI.
+P2D.2–P2D.5 and P2E were not started. ADR-80–84 were not appended (scheduled
+for P2D.5). `schema.prisma` and migrations `00001`–`00005` were not
+modified. No idempotency layer.
+
+Authorised footprint (11 paths):
+
+New:
+
+- `apps/web/lib/api/tenantRoute.ts`
+- `apps/web/lib/api/listQuery.ts`
+- `apps/web/lib/api/apiRateLimit.ts`
+- `apps/web/lib/api/dto.ts`
+- `apps/web/lib/api/tenantRoute.test.ts`
+- `apps/web/lib/api/listQuery.test.ts`
+- `apps/web/lib/api/dto.test.ts`
+- `apps/web/lib/api/routeBoundary.test.ts`
+- `apps/web/tests/integration/apiRateLimit.test.ts`
+
+Modified:
+
+- `apps/web/lib/rateLimiter.ts`
+- `docs/PHASE_02_IMPLEMENTATION.md`
+
+#### Independent Sonnet P2D.1 remediation audit: PASS
+
+Independent Sonnet remediation audit: **PASS**. Q1–Q6 are all resolved.
+No new HIGH or MEDIUM finding. P2D.1 pre-commit readiness: **YES**.
+P2D.2 readiness: **YES**. P2D.2 has not started.
+
+| Id  | Severity | Disposition                                                                                        |
+| --- | -------- | -------------------------------------------------------------------------------------------------- |
+| Q1  | MEDIUM   | Resolved — structural `tenantReadRoute` / `tenantReadPostRoute` / `tenantWriteRoute` constructors. |
+| Q2  | MEDIUM   | Resolved — fail-open is infrastructure-only.                                                       |
+| Q3  | MEDIUM   | Resolved — atomic two-bucket identity `$transaction` with rollback proof.                          |
+| Q4  | MEDIUM   | Resolved — automatic tenant `route.ts` discovery and AST DELETE detection.                         |
+| Q5  | LOW      | Resolved — canonical JSON-array limiter keys.                                                      |
+| Q6  | LOW      | Resolved — request-authority scan narrowed.                                                        |
+
+Independently reproduced:
+
+- `@noahark/web` unit **120/120**
+- `tenantRoute.test.ts` **26/26**
+- `routeBoundary.test.ts` **9/9**
+- `apiRateLimit.test.ts` **12/12**
+- concurrency and rollback tests **5/5**
+- full `@noahark/web` integration **494/494** across 70 files
+- PostgreSQL **18.4**
+
+PostgreSQL **16.14** remains **UNVERIFIED**.
+
+#### Execution order (method-bound constructors)
+
+`apiHandler` remains the outer wrapper (request id, CSRF/origin,
+`jsonError`). There is no exported generic `tenantRoute` and no
+free-form `operation: "read" \| "write"` label.
+
+Structurally distinct constructors:
+
+- `tenantReadRoute` — GET only; never invokes the write limiter.
+- `tenantReadPostRoute` — POST only; reserved for genuinely read-only
+  POST operations. Boundary tests permit it only on an exact path
+  allowlist. The only planned exception is
+  `app/api/v1/tenants/[tenantId]/parties/duplicate-candidates/route.ts`.
+  That exception is not a generic limiter-bypass mechanism.
+- `tenantWriteRoute` — POST, PUT, or PATCH; always invokes the write
+  limiter after successful authentication and authorization. Phase-2
+  DELETE is not supported.
+
+Shared implementation is private. Each constructor knows its permitted
+HTTP methods, verifies `Request.method` at runtime, and fails closed on
+mismatch (before session resolution). An explicit permission is
+required. Exactly one handler runs, and only after every prior step
+succeeds.
+
+Write order: `apiHandler` → `resolveTenantContext` →
+`assertTrustedContext` → optional `legalEntityIdFrom(req.clone(),
+params)` → `authorize({ permission, legalEntityId })` → write limiter →
+handler once. Routes throw domain errors; `jsonError` is the only
+client-facing conversion.
+
+Trusted context is session/membership-derived. Request JSON cannot supply
+`tenantId`, `actingUserId`, `legalEntityIds`, or permissions. No system
+or worker client. No platform-admin bypass. No wildcards. No route-level
+transaction or SQLSTATE mapping.
+
+#### T-3
+
+Owner-derived operations pass `legalEntityId: null`. `authorize()` already
+uses tenant-wide `ctx.permissions` only when `legalEntityId` is null, so
+an entity-scoped-only grant fails closed. Explicit entity-scoped routes
+pass the resolved legal-entity id. Entity A never authorises entity B.
+The wrapper never iterates `ctx.legalEntityIds` looking for “permission
+exists in any accessible entity”.
+
+#### T-10
+
+Archive APIs in later route phases must use `POST .../archive` with
+`{ expectedVersion }`. Phase-2 `DELETE` exports are banned by
+`routeBoundary.test.ts`. No archive route is implemented in P2D.1.
+
+#### T-11 write limiter
+
+Shared PostgreSQL fixed-window limiter on existing
+`AuthRateLimitBucket`. Named constants (not scattered literals):
+
+- `API_WRITE_TENANT_USER` — 120 writes / 60 s per tenant+user
+- `API_WRITE_TENANT` — 1,200 writes / 60 s per tenant aggregate
+
+Authorization runs before consuming a write allowance. Both buckets are
+incremented in one identity-client `$transaction`, in stable order
+(tenant-user, then tenant). Failure of the second increment rolls back
+the first. This is not a nested business/domain transaction and does not
+use the system or worker client.
+
+Either exhaustion returns `RATE_LIMITED` / HTTP 429 via existing
+`RateLimitedError` (Phase 1 has no Retry-After metadata; none was added
+because `packages/core` is protected). Tenants are isolated; users within
+a tenant are independent until the aggregate is reached. Exceeded limits
+are not infrastructure failures.
+
+Fail-open is narrowed to recognised connectivity/availability
+conditions: Prisma codes `P1001`, `P1002`, `P1008`, `P1017`, `P2024`,
+and Node network codes `ECONNREFUSED`, `ECONNRESET`, `ETIMEDOUT`,
+`ENOTFOUND`, `EPIPE`, `EAI_AGAIN`, `EHOSTUNREACH`, `ENETUNREACH`,
+including nested `cause`. Invalid counts, non-integer counts, impossible
+states, bad configuration, programming errors (`TypeError`), SQL
+mistakes, Prisma data errors such as `P2002`, and unknown errors
+propagate to the normal internal-error boundary. Public errors do not
+expose Prisma, SQL, connection strings, raw keys, or tenant/user
+identifiers.
+
+Limiter keys are canonical JSON of fixed arrays before SHA-256 hashing
+of the UTF-8 representation, for example
+`["API_WRITE_TENANT_USER", tenantId, userId]` and
+`["API_WRITE_TENANT", tenantId]`. The logical dimension is part of the
+encoded value, so delimiter-containing hypothetical identifiers cannot
+collide. Raw tenant/user identifiers are never stored or logged.
+
+PostgreSQL enum `RateLimitDimension` remains `EMAIL | IP | MFA_ACCOUNT |
+MFA_IP`. Physical carriers `EMAIL` / `IP` are a documented schema
+constraint only; they are not renamed (no migration). This remaining
+limitation is accepted and disclosed.
+
+`tenantReadRoute` / `tenantReadPostRoute` do not consume a write bucket.
+`tenantWriteRoute` always does. There is no per-route limiter copy.
+Production limits stay 120 / 1,200; tests inject smaller policies.
+
+#### Route-boundary discovery (Q4 / Q6)
+
+`routeBoundary.test.ts` recursively discovers every
+`apps/web/app/api/v1/tenants/[tenantId]/**/route.ts`. Committed Phase-1
+paths are an exact allowlist; any newly discovered tenant route is
+treated as Phase-2 automatically. DELETE exports are rejected via
+TypeScript AST, including `export const DELETE`, `export function
+DELETE`, `export async function DELETE`, `export { handler as DELETE }`,
+and re-exported DELETE aliases. GET must use `tenantReadRoute`; POST
+normally requires `tenantWriteRoute`; `tenantReadPostRoute` is allowed
+only on the duplicate-candidate path; PUT/PATCH require
+`tenantWriteRoute`. Request-derived actor, permission,
+tenant-authority, and legal-entity-scope fields are rejected.
+An unrelated internal `permissions:` DTO/result property is not a
+false positive.
+
+#### List query and DTO
+
+`parseListQuery` converts URL query strings into values domain Zod
+schemas already expect. `"25"` → `25`; `"true"` / `"false"` → booleans;
+malformed integer or boolean → `VALIDATION_FAILED`; empty values
+rejected; repeated singleton parameters rejected; unknown keys rejected
+when a spec is supplied; cursor preserved as an opaque string. No
+`z.coerce`. Domain schemas remain authoritative for bounds such as limit
+1–100. `"1"` is not boolean true.
+
+DTO helpers are explicit and non-recursive: Prisma Decimal /
+decimal-compatible → exact decimal string (JavaScript `number`
+rejected); civil `Date` → `YYYY-MM-DD` using UTC components; timestamp
+`Date` → ISO-8601. Invalid dates are rejected. Source objects are not
+mutated. Civil-date and timestamp conversion are distinct functions.
+
+#### Tests and gates
+
+Node **v26.9.0**, pnpm **11.17.0**, Prisma **7.9.1**. PostgreSQL
+**18.4** (`x86_64-windows`, MSVC) via the existing embedded listener on
+port **55432**. Disposable `noahark_test_*` databases only; never
+persistent `noahark`.
+
+Initial failures (all corrected before the final pass of this
+remediation):
+
+Foundation implementation (prior uncommitted P2D.1 landing):
+
+1. `routeBoundary.test.ts` tree scan originally collected only
+   `route.ts`, so in-memory probes written as other filenames did not
+   trip `scanPhase2RouteTree`. Scanner now discovers tenant `route.ts`
+   files recursively (Q4) rather than scanning every `.ts` filename
+   under a manual namespace list.
+2. Typecheck: `exactOptionalPropertyTypes` rejected spreading possibly-
+   undefined `RequestInit.body`; mock `.calls[0][3]` was untyped. Fixed
+   in the unit test only.
+3. ESLint `@typescript-eslint/consistent-type-imports` forbade
+   `typeof import("./apiRateLimit")` in the limiter mock. Replaced with
+   a value-level cast.
+4. Integration “different user until tenant aggregate” assumed a
+   rejected user-A write did not consume the tenant bucket. Increment-
+   then-check does consume; the fixture was reordered so A uses 3, B
+   uses 2, then both are limited.
+
+Audit remediation (this pass): Q1–Q6 as tabulated above. Additional
+verification corrections:
+
+5. Prettier `--check --end-of-line lf` initially failed on five
+   remediation files (`tenantRoute.test.ts`, `routeBoundary.test.ts`,
+   `apiRateLimit.test.ts`, `rateLimiter.ts`,
+   `PHASE_02_IMPLEMENTATION.md`). Reformatted; re-check **exit 0**.
+6. Typecheck TS2379: `exactOptionalPropertyTypes` rejected
+   `constructorName: string | undefined` assigned onto
+   `constructorName?: string` in the route-boundary method map. Typed
+   as `constructorName?: string | undefined`.
+7. Typecheck TS2305: `createSystemClient` is not an `@noahark/db`
+   export. The integration test restored the existing test-only import
+   from `@noahark/db/system` for bucket inspection; production limiter
+   code still uses only `getIdentityClient`.
+
+Environmental note (not a product defect): a bloated agent `PATH`
+overflowed cmd.exe’s environment limit and made `npx prisma` /
+`vitest` unresolvable until PATH was compacted.
+
+Gates (implementation and remediation; independently reproduced counts
+above):
+
+- `pnpm install --frozen-lockfile` **exit 0**
+- Prettier `--check --end-of-line lf` on the 11 P2D.1 paths **exit 0**
+  (after formatting the five files listed above)
+- `git diff --check` **exit 0**
+- `pnpm turbo run lint --force` **16/16**
+- `pnpm turbo run typecheck --force` **16/16**
+- `@noahark/web` unit **120/120** (13 files)
+- `tenantRoute.test.ts` **26/26**
+- `routeBoundary.test.ts` **9/9**
+- `apiRateLimit.test.ts` PostgreSQL **18.4** (port **55432**) **12/12**.
+  Concurrency test **5/5** consecutive runs. Disposable databases
+  dropped on success and failure.
+- P2A six-file subset **61/61** (6 files)
+- `partyDomain*` **35/35** (9 files)
+- `catalogDomain*` **19/19** (6 files)
+- `pricingDomain*` **15/15** (7 files)
+- `customFieldDomain*` **31/31** (8 files)
+- Full `@noahark/web` integration **494/494** (70 files) on PostgreSQL
+  **18.4**
+- `pnpm --filter @noahark/web build` — Next.js **16.3.4**; restored
+  generated `apps/web/next-env.d.ts` to HEAD
+- OpenAPI validate; `openapi.yaml` hash identical to HEAD
+  (`a49a31ab92759ba6763972cb154b2b47f4436896`); conformance **5/5**
+- Phase 1 Playwright E2E **not run** (no runtime UI/route regression
+  indicated)
+- `pnpm audit --prod`: 7 advisories (1 moderate, 6 high) through
+  Prisma 7.9.1 `mysql2` / `deepmerge-ts` / `fast-uri`. Unchanged
+  hold; no `pnpm audit --fix`.
+- `pnpm audit`: 8 advisories (1 moderate, 7 high), same Prisma paths
+  plus `js-yaml` via swagger-parser. Unchanged hold.
+
+PostgreSQL **16.14**: no leftover TEMP cluster on port **55433**.
+Focused `apiRateLimit.test.ts` **UNVERIFIED**. Full 16.14 suite not
+required (no schema, migration, or RLS change).
+
+#### Accepted risks and remaining non-blocking notes
+
+- Logical API write dimensions are not PostgreSQL enum values until a
+  later approved migration. Physical carriers remain `EMAIL` / `IP`;
+  canonical JSON keys are hashed. This physical enum-carrier limitation
+  is unchanged.
+- Recognised limiter infrastructure failure still fails open (narrowed
+  classifier; same product intent as Phase-1 auth).
+- No Retry-After header (Phase-1 `RateLimitedError` has none; core is
+  protected).
+- `legalEntityIdFrom` may inspect a cloned body; callers must still
+  treat body legal-entity ids as untrusted until membership is checked
+  by `authorize()`.
+- P2D.0 LOW MIME CPU cost is now bounded for authenticated writes by
+  the 120 / 1,200 limiter; unauthenticated/read paths are unchanged.
+- Read-only POST cannot be proven semantically read-only, so
+  `tenantReadPostRoute` remains exact-path allowlisted.
+- Request-schema AST detection is defense-in-depth and may not model
+  unusual indirection.
+- Method mismatch returns HTTP 403 rather than 405.
+
+P2D.1 pre-commit readiness: **YES**. P2D.2 readiness: **YES**.
+P2D.2–P2D.5 have not started. No business endpoint exists yet; later
+route phases must use `tenantReadRoute`, `tenantReadPostRoute`
+(allowlisted read-only POST only), or `tenantWriteRoute`.
