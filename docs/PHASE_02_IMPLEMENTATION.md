@@ -2170,3 +2170,439 @@ P2D.1 pre-commit readiness: **YES**. P2D.2 readiness: **YES**.
 P2D.2–P2D.5 have not started. No business endpoint exists yet; later
 route phases must use `tenantReadRoute`, `tenantReadPostRoute`
 (allowlisted read-only POST only), or `tenantWriteRoute`.
+
+### P2D.2a — Party, Contact and Address APIs
+
+P2D.2a only. Party master HTTP APIs, ownership transfer, duplicate-candidate
+advisory, PartyContact APIs, PartyAddress APIs, OpenAPI fragments, and six
+adversarial route-level integration files. PartyLegalEntityAssignment,
+CustomerRole, VendorRole, catalog, pricing, custom-field APIs, UI, P2D.2b,
+P2D.3, P2D.4, and P2D.5 were not started.
+
+Final independent Sonnet remediation audit: **PASS**. P2D.2a pre-commit
+readiness: **YES**. P2D.2b readiness: **YES**. P2D.2b has not started. No
+HIGH or MEDIUM finding remains. All previous P2D.2a findings are closed.
+PostgreSQL **18.4** is verified. PostgreSQL **16.14** remains UNVERIFIED.
+
+#### Endpoint scope (17 operations)
+
+| Method | Path                                    | Permission                 | Constructor           | operationId                    |
+| ------ | --------------------------------------- | -------------------------- | --------------------- | ------------------------------ |
+| GET    | `/parties`                              | `party:read`               | `tenantReadRoute`     | `listParties`                  |
+| POST   | `/parties`                              | `party:create`             | `tenantWriteRoute`    | `createParty`                  |
+| GET    | `/parties/{partyId}`                    | `party:read`               | `tenantReadRoute`     | `getParty`                     |
+| PATCH  | `/parties/{partyId}`                    | `party:update`             | `tenantWriteRoute`    | `updateParty`                  |
+| POST   | `/parties/{partyId}/archive`            | `party:archive`            | `tenantWriteRoute`    | `archiveParty`                 |
+| POST   | `/parties/{partyId}/ownership-transfer` | `party:transfer_ownership` | `tenantWriteRoute`    | `transferPartyOwnership`       |
+| POST   | `/parties/duplicate-candidates`         | `party:read`               | `tenantReadPostRoute` | `listPartyDuplicateCandidates` |
+| GET    | `/parties/{partyId}/contacts`           | `party_contact:read`       | `tenantReadRoute`     | `listPartyContacts`            |
+| POST   | `/parties/{partyId}/contacts`           | `party_contact:create`     | `tenantWriteRoute`    | `createPartyContact`           |
+| GET    | `/party-contacts/{contactId}`           | `party_contact:read`       | `tenantReadRoute`     | `getPartyContact`              |
+| PATCH  | `/party-contacts/{contactId}`           | `party_contact:update`     | `tenantWriteRoute`    | `updatePartyContact`           |
+| POST   | `/party-contacts/{contactId}/archive`   | `party_contact:archive`    | `tenantWriteRoute`    | `archivePartyContact`          |
+| GET    | `/parties/{partyId}/addresses`          | `party_address:read`       | `tenantReadRoute`     | `listPartyAddresses`           |
+| POST   | `/parties/{partyId}/addresses`          | `party_address:create`     | `tenantWriteRoute`    | `createPartyAddress`           |
+| GET    | `/party-addresses/{addressId}`          | `party_address:read`       | `tenantReadRoute`     | `getPartyAddress`              |
+| PATCH  | `/party-addresses/{addressId}`          | `party_address:update`     | `tenantWriteRoute`    | `updatePartyAddress`           |
+| POST   | `/party-addresses/{addressId}/archive`  | `party_address:archive`    | `tenantWriteRoute`    | `archivePartyAddress`          |
+
+No DELETE handlers. One domain call per operation. No route-local
+transaction. No privileged client. `createParty` remains one atomic domain
+call (party + first assignment + optional roles + duplicate candidates).
+Ownership transfer does not create or revoke assignments.
+
+#### Authorization
+
+P2D.1 constructors only. Business routes do not import `tenantRoute`,
+`apiHandler`, `resolveTenantContext`, or `authorize`.
+
+- `POST /parties` authorizes against the validated body's
+  `ownerLegalEntityId`.
+- Every other owner-derived operation uses `legalEntityId: null` (tenant-wide
+  `Set.has()` only). An entity-scoped-only grant does not satisfy those
+  routes. Empty legal-entity scope fails closed via
+  `requireNonEmptyLegalEntityScope`.
+- Contact and Address creation: owner succeeds (201); assigned non-owner is
+  403 `FORBIDDEN`; unrelated legal-entity and cross-tenant targets are 404
+  `NOT_FOUND`; rejected attempts create no child row and no mutation audit.
+- Opaque not-found coverage for id-based targets is seven mutations plus two
+  GET operations. Those are not nine id-based mutations.
+
+#### Contact masking
+
+CRM `maskPartyContact` is the only masking boundary. Every contact-returning
+operation always includes `email` and `phone`; without
+`party_contact:email:read` / `party_contact:phone:read` the values are JSON
+`null`. Proven on create, get, list, update, and archive for all four field
+permission combinations (neither, email only, phone only, both) plus an
+unrelated extra permission. List and detail projections agree. Masked values
+do not appear elsewhere in serialized bodies or in audit
+before/after/metadata. The tautological `expect(op).toBe(op)` coverage loop
+was removed; the five real handler assertions remain.
+
+#### Duplicate non-disclosure
+
+Advisory and `createParty` embedded candidates are explicitly shaped to
+`partyId`, `partyType`, `matchReasons` only. The duplicate-candidate request
+schema is `.strict()`. Route-level tests prove assigned-reader visibility,
+same-tenant out-of-scope hiding, other-tenant hiding, archived-candidate
+disappearance, contact-email matches without contact payload, secret-input
+non-echo (body, validation error, audit, error text), forged Origin 403, and
+that the read-only POST consumes no write-rate-limit bucket. After the
+out-of-scope and cross-tenant hiding cases, the same seeded candidate is
+re-read by the authorised in-scope assigned reader as a positive control.
+
+#### Pagination
+
+Route query parsing uses `parseListQuery` (no `z.coerce`; unknown or repeated
+keys 422). Domain `boundPageSize` remains authoritative (default effective
+page size 25, maximum returned page size 100). Positive safe integers above
+100 are accepted and capped to 100; they are not rejected. `limit=101`
+returns HTTP 200 with at most 100 rows, exactly 100 when more than 100
+records exist, a non-null `nextCursor` while rows remain, and a subsequent
+cursor page that neither duplicates nor skips. This cap-and-continue proof
+covers Party, Contact and Address lists. Party list order is
+`(createdAt desc, id desc)`. Contact and address lists use `(createdAt, id)`
+ascending, not `isPrimary`. Archived parties are excluded by default;
+`includeArchived=true` and `status=ARCHIVED` follow the committed domain
+rules.
+
+The shared OpenAPI `limit` parameter documents Phase-1 audit-list behaviour
+only (default 25, cap 100, values above 100 accepted and capped,
+non-positive clamped to 1). Party, Contact and Address lists use a distinct
+`partyPageLimit` component: default 25, maximum returned page size 100,
+values above 100 accepted and capped, non-positive/malformed/repeated values
+rejected with HTTP 422. Audit-list runtime behaviour was not changed.
+
+#### Concurrency and audit
+
+Stale Party/Contact/Address update and archive return 409 `STALE_VERSION`.
+Two concurrent ownership transfers with the same `expectedVersion` yield
+exactly one 200 and one 409 `STALE_VERSION`; Party version and owner change
+once; assignment IDs, legal-entity IDs and statuses are unchanged;
+customer-role and vendor-role state is unchanged; exactly one
+`party.ownership_transferred` event whose before/after data contain only
+old/new owner IDs and versions; `verifyAuditChain(...).valid === true` with
+gapless sequences; no unhandled rejection (handlers attached before either
+request can settle). Failed, stale, forbidden, malformed, conflict, and
+rollback paths write no audit event for the rejected mutation. Audit
+`requestId` equals the exact `x-request-id` sent. Audit actor equals the
+authenticated session user. Forged body `actingUserId` / `requestId` /
+`ipAddress` / `tenantId` / `legalEntityIds` / `permissions` do not alter
+audit identity. Contact email and phone do not occur in audit
+before/after/metadata or serialized event text. Routes do not call
+`writeAuditEvent`. Forged-Origin CSRF cases (Party create, Party update,
+Contact archive, Address archive, plus the read-only duplicate POST) return
+403 with mutation rows and audit counts unchanged. Rejected CSRF requests
+do not consume either write-rate-limit bucket. Bucket assertions sum
+canonical EMAIL/IP `keyHash` rows across all `windowStart` values so they
+stay deterministic across window rollover. Client-supplied `x-request-id`
+remains trusted under the pre-existing Phase-1 request-ID behavior.
+
+#### OpenAPI
+
+P2D.2a added the 17 operations above plus schemas `Party`, `PartyAssignment`,
+`PartyRole`, `PartyContact`, `PartyAddress`, `DuplicateCandidate`, `Cursor`,
+`ExpectedVersion`, parameters `partyId`/`contactId`/`addressId` and
+`partyPageLimit`, and the `RateLimited` response.
+
+`PartyRole.defaultCurrency` is documented as `type: [string, "null"]` with
+`enum: [SGD, MYR, IDR, null]`, matching production: customer/vendor roles
+created without a supplied currency serialize `defaultCurrency: null`. Other
+P2D.2a enums combined with a nullable type were inspected; this was the only
+genuine mismatch. Production serialization was not changed to manufacture a
+currency.
+
+Closed success projections (`Party`, `PartyAssignment`, `PartyRole`,
+`PartyContact`, `PartyAddress`, `DuplicateCandidate` and their 2xx envelopes)
+set `additionalProperties: false`. Shared error-detail objects and other
+intentionally open maps were left unchanged.
+
+Permanent nested response validation in `partyApi.test.ts` loads the actual
+OpenAPI YAML and checks representative handler bodies for all 17 operations
+against their documented 2xx schemas, including local `$ref`, objects,
+arrays, pagination envelopes, required properties, enum membership, nullable
+fields, oneOf/anyOf and `additionalProperties`. A non-vacuity assertion
+clones `PartyRole.defaultCurrency` with `enum: [SGD, MYR, IDR]` (no `null`)
+and proves that validator rejects a real createParty customer role whose
+`defaultCurrency` is `null`. Outer-key-only assertions remain as a
+supplement; they alone missed the nested enum defect. Bidirectional
+conformance tests remain intact. P2D.2b and later paths were not documented.
+
+The test-local nested validator is not a complete JSON Schema or OpenAPI
+instance validator. It does not validate `pattern`, `minimum`/`maximum`, or
+`format`. Domain Zod/Prisma validation independently protects the currently
+affected fields. Broader standards-complete OpenAPI response validation is
+deferred to the P2D.5 OpenAPI/closure phase.
+
+#### Route-boundary scanner (L2)
+
+`routeBoundary.test.ts` now also rejects `export const { DELETE } = handlers`,
+aliased and nested destructuring that exports a `DELETE` binding, array
+destructuring that exports `DELETE`, and literal dynamic
+`import("@noahark/db/system")` / `import("@noahark/db/worker")` (including
+no-substitution templates). Ordinary non-HTTP destructuring and unrelated
+dynamic imports remain allowed. Production tenant routes still pass. No
+DELETE handler was added. ESLint configuration was not changed. Deliberate
+string-concatenated privileged dynamic imports can evade the static scan;
+that accepted LOW remains.
+
+#### PostgreSQL
+
+PostgreSQL **18.4** (`x86_64-windows`, MSVC) on port **55432**. Disposable
+`noahark_test_*` databases only; persistent `noahark` was not reset.
+PostgreSQL **16.14** UNVERIFIED (no schema/RLS change).
+
+#### Independent Sonnet P2D.2a audit (FAIL)
+
+No HIGH. Production code passed the attack probes. Three MEDIUM findings
+were remediable in tests/OpenAPI/docs without production redesign:
+
+- F1: committed masking tests were one-sided; completed 5×4(+unrelated)
+  matrix on production handlers with real CRM masking.
+- F2: OpenAPI `limit` `maximum: 100` did not match capping; required
+  properties on success schemas were incomplete.
+- F3: duplicate/isolation/concurrency/audit/CSRF evidence was thin.
+
+LOW L2: the P2D.1 scanner missed destructured DELETE exports and dynamic
+privileged imports (test-only AST correction).
+
+Accepted non-blocking LOW notes:
+
+- Party create must inspect enough body data to obtain `ownerLegalEntityId`
+  before entity-scoped authorization.
+- No new body-size policy is introduced in this narrow remediation.
+- Client-provided request ID remains existing behavior.
+- Party list descending versus Contact/Address ascending is the committed,
+  documented domain order.
+- Generic role-conflict wording remains safe but nonspecific.
+- Stale-version-before-owner behavior leaks nothing beyond the already
+  readable version.
+
+#### Independent focused OpenAPI/evidence audit (NO)
+
+Pre-commit readiness: **NO**. P2D.2b readiness: **NO**. No
+production-service or route defect. One MEDIUM OpenAPI contract defect:
+`PartyRole.defaultCurrency` is null in production when no currency is
+supplied, but the documented enum excluded `null`. Previous outer-key
+assertions compared only envelope keys and hand-maintained constants, so
+they accepted a nested `defaultCurrency: null` that the enum forbade.
+Evidence/documentation LOWs: shared `limit` parameter claimed one behaviour
+for routes with different runtime semantics; Contact/Address `limit=101` cap
+was undocumented at route level; CSRF did not snapshot mutation rows, audit
+counts, or cross-window write buckets; Contact/Address creation isolation
+was missing; duplicate tests lacked a positive control after
+out-of-scope/cross-tenant hiding; masking tests included a tautological
+`expect(op).toBe(op)` loop; wording treated seven mutations plus two GET
+operations as nine id-based mutations.
+
+This uncommitted pass corrected the nullable enum, added nested YAML-driven
+response validation plus a non-vacuity proof, closed P2D.2a success
+projections, split audit vs Party/Contact/Address limit documentation,
+added Contact/Address cap tests, strengthened CSRF/audit/bucket/create-
+isolation/duplicate evidence, and removed the tautological masking
+assertion. Production routes, domain services, limiter and authorization
+were not changed. The later independent remediation audit is recorded
+below.
+
+#### Independent Sonnet P2D.2a remediation audit: PASS
+
+No HIGH. No MEDIUM. All previous P2D.2a findings are closed. The
+`PartyRole.defaultCurrency` nullable-enum defect is closed. Nested response
+validation of all 17 operations, including the non-vacuity proof against the
+former enum-without-null contract, passed. Closed success projections
+passed. Split audit versus P2D.2a limit contracts passed. CSRF, mutation
+state, audit-count and write-bucket evidence passed. Contact and Address
+create isolation passed. Duplicate positive controls passed. Masking and
+route-boundary checks passed.
+
+Independent counts:
+
+- web unit **121/121** (13 files)
+- `routeBoundary.test.ts` **10/10**
+- `partyApi*.test.ts` **14/14** (6 files)
+- masking matrix **5/5** consecutive runs
+- ownership-transfer concurrency **5/5** consecutive runs
+- `apiRateLimit.test.ts` **12/12**
+- `partyDomain*` **35/35** (9 files)
+- P2A six-file subset **61/61** (6 files)
+- OpenAPI validate exit 0; conformance **5/5**
+- full `@noahark/web` integration **508/508** (76 files) on PostgreSQL
+  **18.4** (`x86_64-windows`, MSVC)
+
+P2D.2a pre-commit readiness: **YES**. P2D.2b readiness: **YES**. P2D.2b has
+not started. PostgreSQL **16.14** remains UNVERIFIED.
+
+Accepted LOW limitation — test-local nested OpenAPI validator:
+
+- checks local `$ref`, objects, arrays, required properties, types
+  including null, enums, oneOf/anyOf and `additionalProperties`;
+- does not validate `pattern`, `minimum`/`maximum`, or `format`;
+- domain Zod/Prisma validation independently protects the currently
+  affected fields;
+- this is not a complete JSON Schema or OpenAPI instance validator;
+- broader standards-complete OpenAPI response validation is deferred to the
+  P2D.5 OpenAPI/closure phase.
+
+Previously accepted LOW notes:
+
+- deliberate string-concatenated privileged dynamic imports can evade the
+  route-boundary static scan;
+- client-supplied `x-request-id` remains trusted under the pre-existing
+  Phase-1 request-ID behavior.
+
+#### P2A six-file count
+
+Current canonical six-file subset: **61/61**. The older **60** count predates
+the additional committed P2D.0 assertion (`customFieldTargetIntegrity` 12 →
+13). No P2A test was removed or weakened.
+
+#### Initial failures and corrections
+
+Foundation implementation (prior uncommitted P2D.2a landing):
+
+1. Default Prettier `--check` failed on 10 of the 21 paths. Reformatted with
+   default `prettier --write` (no end-of-line override).
+2. Web lint: `@typescript-eslint/consistent-type-imports` rejected
+   `importOriginal<typeof import("@/lib/context")>` in all six `partyApi*`
+   files. Replaced with a value-level cast of `importOriginal()`, matching
+   the P2D.1 tenant-route unit test.
+3. Typecheck TS2379: Zod optional keys were not assignable to
+   `listDuplicateCandidates` under `exactOptionalPropertyTypes`. The
+   duplicate-candidate route now passes `omitUndefined(body)`.
+4. Typecheck: production handlers were not assignable to a
+   `Record<string,string>` route-handler alias (parameter contravariance).
+   Tests now use a generic `invoke<P extends { tenantId: string }>`.
+5. Typecheck: `withTenantContext` requires `Set<string>`, not
+   `ReadonlySet<string>`. Audit helpers copy into `new Set(...)`.
+6. Typecheck: `AuditEvent.requestId` is nullable; the assertion uses
+   `a.requestId ?? ""`.
+7. Typecheck: pagination `data[key]` was possibly undefined; defaulted to
+   `[]`.
+8. Typecheck: `as LooseHandler` was not overlapping for partyId/contactId
+   handlers; casts are now `as unknown as LooseHandler`.
+9. Integration: the permission success matrix sent `permissions` in the
+   strict duplicate-candidate body and received 422. Extra keys were removed
+   from that success body; body permission strings are still proven not to
+   grant authority on `POST /parties` (stripped) and neighbouring-key 403
+   cases.
+10. After the first failed integration process, PostgreSQL 18.4 on 55432
+    refused connections (`ECONNREFUSED`) because the postmaster had exited
+    during teardown. Restarted `packages/db/scripts/embedded-pg.mjs start`;
+    crash recovery reused the existing data directory. Persistent `noahark`
+    was not dropped or re-created.
+11. Default Prettier `--check` failed on `docs/PHASE_02_IMPLEMENTATION.md`
+    after this subsection was appended. Reformatted with default
+    `prettier --write`.
+
+Audit remediation (this pass):
+
+12. Default Prettier `--check` failed on 6 of the 22 paths
+    (`partyApi.test.ts`, `partyApiDuplicates.test.ts`,
+    `partyApiIsolation.test.ts`, `partyApiMasking.test.ts`,
+    `partyApiPermissions.test.ts`, `PHASE_02_IMPLEMENTATION.md`).
+    Reformatted with default `prettier --write` (no end-of-line override).
+13. Web lint: unused `ContactOp` type in `partyApiMasking.test.ts`. Removed.
+14. Pagination `includeArchived=true&limit=100` after the F2 105-row seed no
+    longer placed the oldest archived Party on the first page. The assertion
+    now walks `includeArchived` cursor pages. Production list behaviour was
+    unchanged.
+
+OpenAPI/evidence remediation (this pass):
+
+15. Default Prettier `--check` failed on 2 of the 22 paths
+    (`partyApi.test.ts`, `partyApiPagination.test.ts`). Reformatted with
+    default `prettier --write` (no end-of-line override).
+
+#### Gates (implementation slice)
+
+- `pnpm install --frozen-lockfile` exit 0
+- Default Prettier `--check` on the 21 paths exit 0 (after item 1)
+- `git diff --check` exit 0
+- `pnpm turbo run lint --filter=@noahark/web --force` exit 0
+- `pnpm turbo run typecheck --filter=@noahark/web --force` exit 0
+- `@noahark/web` unit **120/120** (13 files), including `routeBoundary.test.ts`
+  **9/9**
+- `partyApi*.test.ts` **11/11** (6 files)
+- Ownership-transfer concurrency test **5/5** consecutive runs
+- `apiRateLimit.test.ts` included in the 37-file domain/P2A batch
+- P2A six-file subset **61/61** (6 files)
+- `partyDomain*` **35/35** (9 files)
+- `catalogDomain*` **19/19** (6 files)
+- `pricingDomain*` **15/15** (7 files)
+- `customFieldDomain*` **31/31** (8 files)
+- Combined apiRateLimit + P2A + domain batch **173/173** (37 files)
+- Full `@noahark/web` integration **505/505** (76 files) on PostgreSQL **18.4**
+- `pnpm --filter @noahark/web build` — Next.js **16.3.4**; restored generated
+  `apps/web/next-env.d.ts` to HEAD
+- OpenAPI validate exit 0; conformance **5/5**
+- Phase 1 Playwright E2E **not run** (no UI change; build listed the new
+  routes with no runtime UI regression indicated)
+- `pnpm audit --prod`: 7 advisories (1 moderate, 6 high) through Prisma 7.9.1
+  `mysql2` / `deepmerge-ts` / `fast-uri`. Unchanged hold; no
+  `pnpm audit --fix`.
+- `pnpm audit`: 8 advisories (1 moderate, 7 high), same Prisma paths plus
+  `js-yaml` via swagger-parser. Unchanged hold.
+
+PostgreSQL **16.14**: UNVERIFIED. No leftover TEMP cluster was started.
+
+#### Gates (remediation pass)
+
+- Default Prettier `--check` on the 22 paths exit 0 (after item 12)
+- `git diff --check` exit 0
+- `pnpm turbo run lint --filter=@noahark/web --force` exit 0 (after item 13)
+- `pnpm turbo run typecheck --filter=@noahark/web --force` exit 0
+- `@noahark/web` unit **121/121** (13 files), including `routeBoundary.test.ts`
+  **10/10**
+- `partyApi*.test.ts` **13/13** (6 files)
+- Masking-matrix test **5/5** consecutive runs
+- Ownership-transfer concurrency test **5/5** consecutive runs
+- Duplicate/non-disclosure and isolation tests included in the 13/13
+- `apiRateLimit.test.ts` **12/12**
+- P2A six-file subset **61/61** (6 files)
+- `partyDomain*` **35/35** (9 files)
+- Combined apiRateLimit + P2A + partyDomain + OpenAPI conformance **113/113**
+  (17 files)
+- Full `@noahark/web` integration **507/507** (76 files) on PostgreSQL **18.4**
+- Production build **not run** (no production route/schema/build-surface
+  change in this remediation; `next-env.d.ts` remains at HEAD)
+- OpenAPI validate exit 0; conformance **5/5**
+- `pnpm audit --prod`: 7 advisories (1 moderate, 6 high) through Prisma 7.9.1
+  `mysql2` / `deepmerge-ts` / `fast-uri`. Unchanged hold; no
+  `pnpm audit --fix`.
+- `pnpm audit`: 8 advisories (1 moderate, 7 high), same Prisma paths plus
+  `js-yaml` via swagger-parser. Unchanged hold.
+
+PostgreSQL **16.14**: UNVERIFIED. Disposable `noahark_test_*` databases were
+dropped after every integration run. Persistent `noahark` was not reset.
+
+#### Gates (OpenAPI/evidence remediation)
+
+- Default Prettier `--check` on the 22 paths exit 0 (after item 15)
+- `git diff --check` exit 0
+- `pnpm turbo run lint --filter=@noahark/web --force` exit 0
+- `pnpm turbo run typecheck --filter=@noahark/web --force` exit 0
+- `@noahark/web` unit **121/121** (13 files), including `routeBoundary.test.ts`
+  **10/10**
+- `partyApi*.test.ts` **14/14** (6 files)
+- Masking-matrix test **5/5** consecutive runs
+- Ownership-transfer concurrency test **5/5** consecutive runs
+- `apiRateLimit.test.ts` **12/12**
+- P2A six-file subset **61/61** (6 files)
+- `partyDomain*` **35/35** (9 files)
+- Combined apiRateLimit + P2A + partyDomain + OpenAPI conformance **113/113**
+  (17 files)
+- Full `@noahark/web` integration **508/508** (76 files) on PostgreSQL **18.4**
+  (`x86_64-windows`, MSVC)
+- Production build **not run** (OpenAPI/test/docs only; `next-env.d.ts`
+  remains at HEAD)
+- OpenAPI validate exit 0; conformance **5/5**
+
+PostgreSQL **16.14**: UNVERIFIED. Disposable `noahark_test_*` databases were
+dropped after every integration run. Persistent `noahark` was not reset.
+
+#### Remaining
+
+Independent Sonnet P2D.2a remediation audit: **PASS**. P2D.2a pre-commit
+readiness: **YES**. P2D.2b readiness: **YES**. P2D.2b has not started.
+PostgreSQL **16.14** remains UNVERIFIED.

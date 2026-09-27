@@ -104,6 +104,34 @@ function calleeName(expr: ts.Expression): string | undefined {
   return undefined;
 }
 
+function collectExportedBindingNames(name: ts.BindingName): string[] {
+  if (ts.isIdentifier(name)) return [name.text];
+  const names: string[] = [];
+  if (ts.isObjectBindingPattern(name)) {
+    for (const element of name.elements) {
+      names.push(...collectExportedBindingNames(element.name));
+    }
+    return names;
+  }
+  if (ts.isArrayBindingPattern(name)) {
+    for (const element of name.elements) {
+      if (ts.isOmittedExpression(element)) continue;
+      names.push(...collectExportedBindingNames(element.name));
+    }
+  }
+  return names;
+}
+
+function dynamicImportSpecifier(node: ts.CallExpression): string | undefined {
+  if (node.expression.kind !== ts.SyntaxKind.ImportKeyword) return undefined;
+  const arg = node.arguments[0];
+  if (!arg) return undefined;
+  if (ts.isStringLiteral(arg) || ts.isNoSubstitutionTemplateLiteral(arg)) {
+    return arg.text;
+  }
+  return undefined;
+}
+
 function collectLocalInitializers(sourceFile: ts.SourceFile): Map<string, ts.Expression> {
   const locals = new Map<string, ts.Expression>();
   const visit = (node: ts.Node): void => {
@@ -198,6 +226,13 @@ export function scanPhase2RouteSource(source: string, fileLabel: string): string
       }
     }
 
+    if (ts.isCallExpression(node)) {
+      const specifier = dynamicImportSpecifier(node);
+      if (specifier && BANNED_IMPORTS.has(specifier)) {
+        offenders.push(`${fileLabel} — ${specifier}`);
+      }
+    }
+
     if (ts.isIdentifier(node)) {
       if (BANNED_IDENTIFIERS.has(node.text)) {
         offenders.push(`${fileLabel} — ${node.text}`);
@@ -277,11 +312,17 @@ export function scanPhase2RouteSource(source: string, fileLabel: string): string
         node.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword) === true;
       if (exported) {
         for (const decl of node.declarationList.declarations) {
-          if (!ts.isIdentifier(decl.name) || !HTTP_METHODS.has(decl.name.text)) continue;
-          exportedMethods.set(decl.name.text, {
-            constructorName: decl.initializer ? calleeName(decl.initializer) : undefined,
-            form: `export const ${decl.name.text}`,
-          });
+          const exportedNames = collectExportedBindingNames(decl.name);
+          for (const exportedName of exportedNames) {
+            if (!HTTP_METHODS.has(exportedName)) continue;
+            exportedMethods.set(exportedName, {
+              constructorName:
+                ts.isIdentifier(decl.name) && decl.initializer
+                  ? calleeName(decl.initializer)
+                  : undefined,
+              form: `export const ${exportedName}`,
+            });
+          }
         }
       }
     }
@@ -420,6 +461,22 @@ describe("Phase-2 route boundary scanner", () => {
         file: "re-exported DELETE alias",
         source: `const remove = async () => jsonOk({});\nexport { remove as DELETE };\n`,
       },
+      {
+        file: "destructured DELETE",
+        source: `const handlers = { DELETE: async () => jsonOk({}) };\nexport const { DELETE } = handlers;\n`,
+      },
+      {
+        file: "aliased destructured DELETE",
+        source: `const handlers = { remove: async () => jsonOk({}) };\nexport const { remove: DELETE } = handlers;\n`,
+      },
+      {
+        file: "nested destructured DELETE",
+        source: `const bag = { handlers: { DELETE: async () => jsonOk({}) } };\nexport const { handlers: { DELETE } } = bag;\n`,
+      },
+      {
+        file: "array-destructured DELETE",
+        source: `const handlers = [async () => jsonOk({}), async () => jsonOk({})];\nexport const [, DELETE] = handlers;\n`,
+      },
     ];
     for (const form of forms) {
       const hits = scanPhase2RouteSource(
@@ -431,6 +488,32 @@ describe("Phase-2 route boundary scanner", () => {
         `${form.file} must be rejected`,
       ).toBe(true);
     }
+  });
+
+  it("rejects dynamic privileged database imports and allows unrelated destructuring and imports", () => {
+    const systemHits = scanPhase2RouteSource(
+      `void import("@noahark/db/system");\nexport const GET = tenantReadRoute({ permission: PERMISSIONS.PARTY_READ, handler: async () => jsonOk({}) });\n`,
+      "app/api/v1/tenants/[tenantId]/parties/dynamic-system/route.ts",
+    );
+    expect(systemHits.some((h) => h.includes("@noahark/db/system"))).toBe(true);
+
+    const workerHits = scanPhase2RouteSource(
+      `await import("@noahark/db/worker");\nexport const GET = tenantReadRoute({ permission: PERMISSIONS.PARTY_READ, handler: async () => jsonOk({}) });\n`,
+      "app/api/v1/tenants/[tenantId]/parties/dynamic-worker/route.ts",
+    );
+    expect(workerHits.some((h) => h.includes("@noahark/db/worker"))).toBe(true);
+
+    const templateHits = scanPhase2RouteSource(
+      "void import(`@noahark/db/system`);\nexport const GET = tenantReadRoute({ permission: PERMISSIONS.PARTY_READ, handler: async () => jsonOk({}) });\n",
+      "app/api/v1/tenants/[tenantId]/parties/dynamic-template/route.ts",
+    );
+    expect(templateHits.some((h) => h.includes("@noahark/db/system"))).toBe(true);
+
+    const safe = scanPhase2RouteSource(
+      `const lib = { helper: 1 };\nexport const { helper } = lib;\nvoid import("@noahark/crm");\nexport const GET = tenantReadRoute({ permission: PERMISSIONS.PARTY_READ, handler: async () => jsonOk({}) });\n`,
+      "app/api/v1/tenants/[tenantId]/parties/safe-destructure/route.ts",
+    );
+    expect(safe).toEqual([]);
   });
 
   it("enforces GET/read, read-only POST allowlist, and write constructors", () => {
