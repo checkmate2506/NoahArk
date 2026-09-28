@@ -2606,3 +2606,257 @@ dropped after every integration run. Persistent `noahark` was not reset.
 Independent Sonnet P2D.2a remediation audit: **PASS**. P2D.2a pre-commit
 readiness: **YES**. P2D.2b readiness: **YES**. P2D.2b has not started.
 PostgreSQL **16.14** remains UNVERIFIED.
+
+### P2D.2b — Party assignment, CustomerRole and VendorRole APIs
+
+P2D.2b only. Nine route files, 13 operations, OpenAPI fragments, one
+extracted OpenAPI response-validator helper (P2D.2a `partyApi.test.ts`
+now imports it), six new integration files, and safe public schema
+re-exports from `partyDomain.ts`. Catalog, pricing, custom-field APIs,
+UI, P2D.3, P2D.4, and P2D.5 were not started.
+
+Final independent Sonnet P2D.2b audit: **PASS**. P2D.2b pre-commit
+readiness: **YES**. P2D.3 readiness: **YES**. P2D.3 has not started.
+No HIGH or MEDIUM finding remains.
+
+#### Endpoint and permission inventory (13 operations)
+
+| Method | Path                                       | Permission                | Constructor        | `legalEntityIdFrom`           | operationId             |
+| ------ | ------------------------------------------ | ------------------------- | ------------------ | ----------------------------- | ----------------------- |
+| GET    | `/party-assignments`                       | `party_assignment:read`   | `tenantReadRoute`  | query `legalEntityId` or null | `listPartyAssignments`  |
+| POST   | `/party-assignments`                       | `party_assignment:create` | `tenantWriteRoute` | body `legalEntityId`          | `createPartyAssignment` |
+| GET    | `/party-assignments/{assignmentId}`        | `party_assignment:read`   | `tenantReadRoute`  | null (tenant-wide)            | `getPartyAssignment`    |
+| PATCH  | `/party-assignments/{assignmentId}`        | `party_assignment:update` | `tenantWriteRoute` | null (tenant-wide)            | `updatePartyAssignment` |
+| POST   | `/party-assignments/{assignmentId}/revoke` | `party_assignment:revoke` | `tenantWriteRoute` | null (tenant-wide)            | `revokePartyAssignment` |
+| POST   | `/customer-roles`                          | `customer_role:create`    | `tenantWriteRoute` | null (tenant-wide)            | `createCustomerRole`    |
+| GET    | `/customer-roles/{roleId}`                 | `customer_role:read`      | `tenantReadRoute`  | null (tenant-wide)            | `getCustomerRole`       |
+| PATCH  | `/customer-roles/{roleId}`                 | `customer_role:update`    | `tenantWriteRoute` | null (tenant-wide)            | `updateCustomerRole`    |
+| POST   | `/customer-roles/{roleId}/archive`         | `customer_role:archive`   | `tenantWriteRoute` | null (tenant-wide)            | `archiveCustomerRole`   |
+| POST   | `/vendor-roles`                            | `vendor_role:create`      | `tenantWriteRoute` | null (tenant-wide)            | `createVendorRole`      |
+| GET    | `/vendor-roles/{roleId}`                   | `vendor_role:read`        | `tenantReadRoute`  | null (tenant-wide)            | `getVendorRole`         |
+| PATCH  | `/vendor-roles/{roleId}`                   | `vendor_role:update`      | `tenantWriteRoute` | null (tenant-wide)            | `updateVendorRole`      |
+| POST   | `/vendor-roles/{roleId}/archive`           | `vendor_role:archive`     | `tenantWriteRoute` | null (tenant-wide)            | `archiveVendorRole`     |
+
+No DELETE. No `tenantReadPostRoute`. No role-list endpoints. CustomerRole
+uses `@noahark/crm`; VendorRole uses `@noahark/purchasing`. Routes do not
+import `apiHandler`, `resolveTenantContext`, `authorize`, privileged DB
+clients, `$transaction`, Prisma/SQLSTATE mapping, or audit writers.
+
+#### T-3 tenant-wide-only decisions
+
+- POST assignment create authorizes against the validated body
+  `legalEntityId`. Entity-scoped `party_assignment:create` for A cannot
+  create for B. Forged body `permissions` / `actingUserId` / `requestId`
+  / `tenantId` / `legalEntityIds` do not grant authority.
+- GET assignment list with a validated `legalEntityId` query filter
+  authorizes against that legal entity. Unfiltered list uses
+  `legalEntityId: null` and therefore requires the tenant-wide
+  permission. Entity-scoped list permission cannot read another entity's
+  filter and cannot satisfy id-derived GET/PATCH/revoke.
+- All id-derived assignment operations and all CustomerRole/VendorRole
+  operations use `legalEntityId: null`. The assignment legal entity is
+  derived only after the domain read. Entity-scoped role permission is
+  403 even when the caller has matching legal-entity membership.
+- Routes do not pre-read a row to discover its legal entity before
+  `authorize()`.
+
+#### Pagination (GET `/party-assignments`)
+
+Cursor-paginated using the committed P2D.0 `(createdAt, id)` ascending
+contract. Default effective page size 25. Maximum returned page size
+100; values above 100 are accepted and capped. Malformed, non-positive,
+unsafe or repeated `limit` → 422. Unknown or repeated query parameters
+→ 422. Invalid cursor → 422. `partyId` and `legalEntityId` filters work
+independently and together and cannot widen trusted scope. Multi-page
+traversal has no duplicates; final `nextCursor` is null.
+
+#### Assignment last-ACTIVE invariants
+
+Duplicate `(party, legalEntity)` → 409 `CONFLICT`. Suspend or revoke of
+the final ACTIVE assignment → 409 `CONFLICT` (serial proofs independent
+of the race). Revoked assignments cannot be silently reactivated
+(ACTIVE on an ARCHIVED row → 422). Concurrent last-ACTIVE: seed two
+ACTIVE assignments, attach handlers, revoke both; exactly one commits
+(200), the other 409 `CONFLICT`, at least one ACTIVE remains, one
+`party_assignment.revoked` audit, chain valid. Five consecutive runs of
+`assignmentApi.test.ts` (including that race) passed with no timeout or
+unhandled rejection. Domain advisory lock remains the serialization
+authority. Routes do not write Party ownership or Party master fields
+and do not emit their own audit events.
+
+#### Role uniqueness and isolation
+
+One CustomerRole and one VendorRole per assignment (duplicate → 409,
+no extra audit). Customer codes unique per legal entity; vendor codes
+unique per legal entity independently. The same code in a different
+legal entity follows the committed domain uniqueness contract
+(`@@unique([legalEntityId, code])`). Customer and vendor codes do not
+conflict with each other. Request `defaultCurrency` is optional,
+non-null, and SGD/MYR/IDR; output remains nullable. Archive is an
+explicit POST with a strict `{ expectedVersion }` body. Stale
+update/archive → 409 `STALE_VERSION`. Archived roles cannot be updated
+or re-archived (422). Role mutations leave Party and assignment
+snapshots unchanged. Cross-entity or invisible assignment/role ids →
+404 with the same public envelope as a missing id. Same-tenant
+out-of-scope → 404. Cross-tenant → 404. Forged tenant path → 403.
+Empty legal-entity scope → 403. Request body cannot widen legal-entity
+scope.
+
+#### Audit actions and rollback
+
+Verified representative actions: `party_assignment.created` /
+`.updated` / `.revoked`; `customer_role.created` / `.updated` /
+`.archived`; `vendor_role.created` / `.updated` / `.archived`. Actor
+and request id come from trusted context (`x-request-id` + session
+user). Forged body actor/request/tenant/permission fields do not alter
+audit identity. Stale/conflict/forbidden/not-found/validation failures
+add no mutation audit. Duplicate role/code failure rolls back the
+attempted mutation and audit. `verifyAuditChain(...).valid === true`
+with gapless sequences. CSRF forged Origin on assignment create,
+assignment update, assignment revoke, CustomerRole archive and
+VendorRole archive → 403 with no mutation, no audit row, and no write-
+bucket consumption. Authorized writes increment tenant-user and tenant
+write buckets once.
+
+#### OpenAPI
+
+Thirteen operations documented with the required operationIds.
+Permission semantics and tenant-wide-only limitation are in each
+description. Assignment list documents pagination, cap and filters.
+Success envelopes require `data` and always-emitted fields;
+`additionalProperties: false` on closed projections. Output
+`defaultCurrency` is nullable with enum including literal null;
+request `defaultCurrency` is optional, non-null, SGD/MYR/IDR.
+`expectedVersion` required where applicable. No DELETE. Nested 2xx
+validation of all 13 operations reuses the extracted P2D.2a test-local
+validator (`pattern` / numeric bounds / `format` still deferred to
+P2D.5). Non-vacuity: a deliberately broken nested assignment status
+enum and a broken nested role `defaultCurrency` enum are rejected.
+`PartyAssignment.assignedAt` was added to the schema `properties` (it
+was already `required`) so nested validation matches `toPublicAssignment`.
+
+#### Path inventory (20)
+
+Nine route files; `apps/web/lib/services/partyDomain.ts` (schema
+re-exports only); `apps/web/openapi.yaml`;
+`apps/web/tests/integration/openapiResponseValidator.ts`;
+`apps/web/tests/integration/partyApi.test.ts` (import the helper and
+restore `node:fs`/`node:path` used by the existing route-source scan);
+six new integration files; `docs/PHASE_02_IMPLEMENTATION.md`.
+`partySchemas.ts` was not modified. Hard cap 24 not exceeded. No
+placeholder files.
+
+#### Test counts
+
+- P2D.2b assignment/role integration **11/11** (6 files)
+- `partyApi*.test.ts` **14/14** (6 files)
+- Assignment last-ACTIVE concurrency file **5/5** consecutive runs
+  (2 tests each run, including the concurrent revoke race)
+- `@noahark/web` unit **121/121** (13 files), including
+  `routeBoundary.test.ts` **10/10** (automatic scanner discovered all
+  nine new route files)
+- `apiRateLimit.test.ts` **12/12**
+- P2A six-file subset **61/61** (6 files)
+- `partyDomain*` **35/35** (9 files)
+- Combined partyApi + apiRateLimit + partyDomain + P2A + OpenAPI
+  conformance **127/127** (23 files)
+- Full `@noahark/web` integration **519/519** (82 files) on PostgreSQL
+  **18.4** (`x86_64-windows`, MSVC), port **55432**
+- OpenAPI validate exit 0; conformance **5/5**
+- `pnpm --filter @noahark/web build` — Next.js **16.3.4**; restored
+  generated `apps/web/next-env.d.ts` to HEAD
+
+PostgreSQL **16.14**: UNVERIFIED (no schema or RLS change in this
+slice). Disposable `noahark_test_*` databases were dropped after every
+integration run. Persistent `noahark` was not reset, seeded, migrated
+or mutated.
+
+#### Initial failures and corrections
+
+1. Serial last-ACTIVE suspend asserted 409 while a second ACTIVE
+   assignment still existed. The suspend-last and revoke-last proofs
+   now run after the other assignment is revoked, matching the committed
+   domain “final ACTIVE” rule.
+2. Permission-matrix POST `/party-assignments` expected 201 but received
+   409 because setup had already created the `(party, leB)` assignment.
+   Create-op setup no longer pre-inserts that row.
+3. `JSON.stringify(audits)` threw on Prisma `bigint` sequences. Tests
+   now stringify with a bigint replacer.
+4. Assignment-create audit `requestId` was compared against the first
+   `party_assignment.created` row, which came from domain `createParty`
+   seeding. Assertions now match `entityId` to the HTTP-created row
+   (same pattern as P2D.2a `PARTY_CREATED`).
+5. Extracting the OpenAPI validator dropped `readFileSync`/`join`
+   imports that `partyApi.test.ts` still uses for its route-source scan.
+   Imports restored; P2D.2a behavior unchanged.
+6. Typecheck TS2322: `roleFrom` could return `undefined`. The helper
+   now throws if the envelope key is missing.
+7. Default Prettier `--check` failed on `assignmentApi.test.ts` after
+   the entity-id audit fix. Reformatted with default `prettier --write`.
+8. Nested OpenAPI validation would reject `assignedAt` as an additional
+   property: `PartyAssignment` listed `assignedAt` as required but
+   omitted it from `properties`. Property added to match
+   `toPublicAssignment`. No P2D.2a route behavior change.
+
+#### Dependency audit (point-in-time)
+
+- `pnpm audit --prod`: 7 advisories (1 moderate, 6 high) through Prisma
+  7.9.1 `mysql2` / `deepmerge-ts` / `fast-uri`. Unchanged hold; no
+  `pnpm audit --fix`.
+- `pnpm audit`: 8 advisories (1 moderate, 7 high), same Prisma paths
+  plus `js-yaml` via swagger-parser. Unchanged hold.
+
+#### Protected surfaces
+
+No change to `packages/db/prisma/**`, schema, migrations, RLS, grants,
+permission catalogue, CRM/Purchasing domain-service production code,
+authz, limiter, package manifests, lockfile, UI, ADR history, P2D.3
+catalog/pricing routes, P2D.4 custom-field routes, or P2D.5 closure
+work. `partyDomain.ts` only re-exports already-committed public
+schemas.
+
+#### Independent Sonnet P2D.2b audit: PASS
+
+No HIGH. No MEDIUM. All required gates passed. Staging was empty. The
+footprint is exactly 20 P2D.2b paths. T-3 tenant-wide-only
+authorization passed. Assignment last-ACTIVE invariant passed. Shared
+advisory-lock analysis covers revoke-versus-revoke, suspend-versus-
+suspend and suspend-versus-revoke. Customer/vendor role uniqueness and
+namespace isolation passed. Cross-tenant and cross-entity
+non-enumeration passed. CSRF, rate-limit, trusted audit identity and
+rollback checks passed. The extracted OpenAPI response-validator
+behavior was preserved. All 13 new operations passed nested response
+validation. OpenAPI validation and conformance passed.
+
+Independent counts:
+
+- web unit **121/121** (13 files)
+- `routeBoundary.test.ts` **10/10**
+- P2D.2b integration **11/11** (6 files)
+- P2D.2a `partyApi*.test.ts` **14/14** (6 files)
+- assignment concurrency **5/5** consecutive runs
+- `apiRateLimit.test.ts` **12/12**
+- `partyDomain*` **35/35** (9 files)
+- P2A six-file subset **61/61** (6 files)
+- OpenAPI validate exit 0; conformance **5/5**
+- full `@noahark/web` integration **519/519** (82 files) on PostgreSQL
+  **18.4** (`x86_64-windows`, MSVC)
+
+P2D.2b pre-commit readiness: **YES**. P2D.3 readiness: **YES**. P2D.3
+has not started. PostgreSQL **18.4** is verified. PostgreSQL **16.14**
+remains UNVERIFIED.
+
+Accepted LOW findings:
+
+1. No dedicated P2D.2b assertion for repeated, empty or malformed
+   explicit `legalEntityId` list filters. The shared `parseListQuery`
+   path is already covered generically and was independently traced.
+2. Suspend-versus-revoke is not a separate concurrency test. Both
+   paths use the identical per-party advisory lock and last-ACTIVE
+   check, so the guarantee is structural.
+3. The test OpenAPI validator does not check `pattern`, numeric bounds
+   or `format`. Standards-complete validation remains deferred to
+   P2D.5.
+4. The route-boundary scanner cannot detect deliberately
+   string-concatenated dynamic import specifiers. This is an accepted
+   internal-code-review limitation.

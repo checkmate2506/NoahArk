@@ -4,9 +4,9 @@ info:
   version: "1"
   description: >
     Phase 1 foundation surface plus P2D.2a Party, PartyContact and
-    PartyAddress APIs. Assignment, customer-role, vendor-role, catalog,
-    pricing, custom-field, accounting, payroll, tax, invoicing, purchasing
-    and project endpoints are not part of this slice — see
+    PartyAddress APIs and P2D.2b Party assignment, CustomerRole and
+    VendorRole APIs. Catalog, pricing, custom-field, accounting, payroll,
+    tax, invoicing and project endpoints are not part of this slice — see
     docs/IMPLEMENTATION_ROADMAP.md.
 
 
@@ -375,7 +375,7 @@ components:
     PartyAssignment:
       type: object
       additionalProperties: false
-      description: First legal-entity assignment created atomically by createParty. Assignment APIs are out of scope for P2D.2a.
+      description: First legal-entity assignment. Status is ACTIVE, SUSPENDED or ARCHIVED (revoke archives). Dedicated assignment APIs are P2D.2b.
       required:
         [
           id,
@@ -392,7 +392,7 @@ components:
         id: { type: string }
         partyId: { type: string }
         legalEntityId: { type: string }
-        status: { type: string, enum: [ACTIVE, ARCHIVED] }
+        status: { type: string, enum: [ACTIVE, SUSPENDED, ARCHIVED] }
         assignedAt: { type: string, format: date-time }
         archivedAt: { type: [string, "null"], format: date-time }
         version: { type: integer, minimum: 1 }
@@ -401,7 +401,7 @@ components:
     PartyRole:
       type: object
       additionalProperties: false
-      description: Optional customer or vendor role created atomically by createParty when requested. Dedicated role APIs are out of scope for P2D.2a.
+      description: Customer or vendor role projection. Dedicated role APIs are P2D.2b. Output defaultCurrency is null when none was supplied.
       required:
         [
           id,
@@ -423,7 +423,7 @@ components:
         defaultCurrency:
           type: [string, "null"]
           enum: [SGD, MYR, IDR, null]
-        status: { type: string, enum: [ACTIVE, ARCHIVED] }
+        status: { type: string, enum: [ACTIVE, SUSPENDED, ARCHIVED] }
         archivedAt: { type: [string, "null"], format: date-time }
         version: { type: integer, minimum: 1 }
         createdAt: { type: string, format: date-time }
@@ -598,11 +598,28 @@ components:
       required: false
       schema: { type: integer, minimum: 1, default: 25 }
       description: >
-        Optional page size for Party, Contact and Address lists. Default
-        effective page size is 25. The maximum returned page size is 100.
-        Positive safe integers above 100 are accepted and capped to 100.
-        Malformed, non-positive, unsafe or repeated values return
+        Optional page size for Party, Contact, Address and Party-assignment
+        lists. Default effective page size is 25. The maximum returned page
+        size is 100. Positive safe integers above 100 are accepted and capped
+        to 100. Malformed, non-positive, unsafe or repeated values return
         VALIDATION_FAILED (HTTP 422).
+    assignmentListPartyId:
+      name: partyId
+      in: query
+      required: false
+      schema: { type: string }
+      description: >
+        Optional assignment-list filter. Does not widen trusted legal-entity
+        scope.
+    assignmentListLegalEntityId:
+      name: legalEntityId
+      in: query
+      required: false
+      schema: { type: string }
+      description: >
+        Optional assignment-list filter. When present, authorization uses this
+        legal entity (entity-scoped `party_assignment:read` may succeed). When
+        omitted, the list requires tenant-wide `party_assignment:read`.
   responses:
     Unauthorized:
       description: No valid session (UNAUTHENTICATED)
@@ -3056,6 +3073,661 @@ paths:
                     required: [address]
                     properties:
                       address: { $ref: "#/components/schemas/PartyAddress" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/StaleVersion"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /tenants/{tenantId}/party-assignments:
+    get:
+      operationId: listPartyAssignments
+      tags: [PartyAssignments]
+      security: [{ sessionCookie: [] }]
+      summary: List party legal-entity assignments
+      x-noahark-permission: party_assignment:read
+      x-noahark-csrf: false
+      description: >
+        Cursor-paginated assignment list ordered by `(createdAt, id)`
+        ascending. Default effective page size 25, maximum returned page size
+        100. Values above 100 are accepted and capped. Without `legalEntityId`,
+        authorization is tenant-wide (`legalEntityId` null). With a validated
+        `legalEntityId` query filter, authorization uses that legal entity.
+        Filters cannot widen trusted scope. Empty legal-entity scope fails
+        closed.
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/cursor" }
+        - { $ref: "#/components/parameters/partyPageLimit" }
+        - { $ref: "#/components/parameters/assignmentListPartyId" }
+        - { $ref: "#/components/parameters/assignmentListLegalEntityId" }
+      responses:
+        "200":
+          description: "{ data: { assignments, nextCursor } }"
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [assignments, nextCursor]
+                    properties:
+                      assignments:
+                        type: array
+                        items: { $ref: "#/components/schemas/PartyAssignment" }
+                      nextCursor: { type: [string, "null"] }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+    post:
+      operationId: createPartyAssignment
+      tags: [PartyAssignments]
+      security: [{ sessionCookie: [] }]
+      summary: Create a party legal-entity assignment
+      x-noahark-permission: party_assignment:create
+      x-noahark-csrf: true
+      description: >
+        Authorization uses the validated body's `legalEntityId`. Duplicate
+        `(party, legalEntity)` returns CONFLICT. Domain advisory lock serializes
+        assignment-set mutations. Does not change Party ownership or master
+        fields.
+      parameters: [{ $ref: "#/components/parameters/tenantId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [partyId, legalEntityId]
+              properties:
+                partyId: { type: string }
+                legalEntityId: { type: string }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [assignment]
+                    properties:
+                      assignment: { $ref: "#/components/schemas/PartyAssignment" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /tenants/{tenantId}/party-assignments/{assignmentId}:
+    get:
+      operationId: getPartyAssignment
+      tags: [PartyAssignments]
+      security: [{ sessionCookie: [] }]
+      summary: Get a party assignment by id
+      x-noahark-permission: party_assignment:read
+      x-noahark-csrf: false
+      description: >
+        Id-derived read. Authorization is tenant-wide (`legalEntityId` null).
+        Invisible or missing ids return the same NOT_FOUND envelope.
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/assignmentId" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [assignment]
+                    properties:
+                      assignment: { $ref: "#/components/schemas/PartyAssignment" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      operationId: updatePartyAssignment
+      tags: [PartyAssignments]
+      security: [{ sessionCookie: [] }]
+      summary: Update assignment status
+      x-noahark-permission: party_assignment:update
+      x-noahark-csrf: true
+      description: >
+        Id-derived mutation. Authorization is tenant-wide. Permitted status
+        values are ACTIVE and SUSPENDED. Suspending the final ACTIVE assignment
+        returns CONFLICT. Archived assignments cannot be updated. Does not
+        restore a revoked assignment.
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/assignmentId" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [expectedVersion, status]
+              properties:
+                expectedVersion: { $ref: "#/components/schemas/ExpectedVersion" }
+                status: { type: string, enum: [ACTIVE, SUSPENDED] }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [assignment]
+                    properties:
+                      assignment: { $ref: "#/components/schemas/PartyAssignment" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: CONFLICT or STALE_VERSION
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /tenants/{tenantId}/party-assignments/{assignmentId}/revoke:
+    post:
+      operationId: revokePartyAssignment
+      tags: [PartyAssignments]
+      security: [{ sessionCookie: [] }]
+      summary: Revoke (archive) a party assignment
+      x-noahark-permission: party_assignment:revoke
+      x-noahark-csrf: true
+      description: >
+        Id-derived mutation. Authorization is tenant-wide. Body is a strict
+        `{ expectedVersion }` object. Revoking the final ACTIVE assignment
+        returns CONFLICT. There is no HTTP DELETE.
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/assignmentId" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [expectedVersion]
+              properties:
+                expectedVersion: { $ref: "#/components/schemas/ExpectedVersion" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [assignment]
+                    properties:
+                      assignment: { $ref: "#/components/schemas/PartyAssignment" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: CONFLICT or STALE_VERSION
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /tenants/{tenantId}/customer-roles:
+    post:
+      operationId: createCustomerRole
+      tags: [CustomerRoles]
+      security: [{ sessionCookie: [] }]
+      summary: Create a customer role on an assignment
+      x-noahark-permission: customer_role:create
+      x-noahark-csrf: true
+      description: >
+        Authorization is tenant-wide because the assignment legal entity is
+        derived only after the domain read. Cross-entity or invisible
+        assignment ids return NOT_FOUND. One CustomerRole per assignment.
+        Request defaultCurrency is optional, non-null, and one of SGD/MYR/IDR.
+        Output defaultCurrency is nullable.
+      parameters: [{ $ref: "#/components/parameters/tenantId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [assignmentId, code]
+              properties:
+                assignmentId: { type: string }
+                code: { type: string, minLength: 1, maxLength: 64 }
+                defaultCurrency: { type: string, enum: [SGD, MYR, IDR] }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [customerRole]
+                    properties:
+                      customerRole: { $ref: "#/components/schemas/PartyRole" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /tenants/{tenantId}/customer-roles/{roleId}:
+    get:
+      operationId: getCustomerRole
+      tags: [CustomerRoles]
+      security: [{ sessionCookie: [] }]
+      summary: Get a customer role by id
+      x-noahark-permission: customer_role:read
+      x-noahark-csrf: false
+      description: >
+        Authorization is tenant-wide. Invisible or missing ids return the same
+        NOT_FOUND envelope.
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/roleId" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [customerRole]
+                    properties:
+                      customerRole: { $ref: "#/components/schemas/PartyRole" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      operationId: updateCustomerRole
+      tags: [CustomerRoles]
+      security: [{ sessionCookie: [] }]
+      summary: Update a customer role
+      x-noahark-permission: customer_role:update
+      x-noahark-csrf: true
+      description: >
+        Authorization is tenant-wide. Does not alter Party fields, ownership or
+        assignments. Request defaultCurrency may be omitted, set to SGD/MYR/IDR,
+        or null to clear. Archived roles cannot be updated.
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/roleId" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [expectedVersion]
+              properties:
+                expectedVersion: { $ref: "#/components/schemas/ExpectedVersion" }
+                code: { type: string, minLength: 1, maxLength: 64 }
+                defaultCurrency:
+                  type: [string, "null"]
+                  enum: [SGD, MYR, IDR, null]
+                status: { type: string, enum: [ACTIVE, SUSPENDED] }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [customerRole]
+                    properties:
+                      customerRole: { $ref: "#/components/schemas/PartyRole" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: CONFLICT or STALE_VERSION
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /tenants/{tenantId}/customer-roles/{roleId}/archive:
+    post:
+      operationId: archiveCustomerRole
+      tags: [CustomerRoles]
+      security: [{ sessionCookie: [] }]
+      summary: Archive a customer role
+      x-noahark-permission: customer_role:archive
+      x-noahark-csrf: true
+      description: >
+        Authorization is tenant-wide. Body is a strict `{ expectedVersion }`
+        object. There is no HTTP DELETE.
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/roleId" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [expectedVersion]
+              properties:
+                expectedVersion: { $ref: "#/components/schemas/ExpectedVersion" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [customerRole]
+                    properties:
+                      customerRole: { $ref: "#/components/schemas/PartyRole" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/StaleVersion"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /tenants/{tenantId}/vendor-roles:
+    post:
+      operationId: createVendorRole
+      tags: [VendorRoles]
+      security: [{ sessionCookie: [] }]
+      summary: Create a vendor role on an assignment
+      x-noahark-permission: vendor_role:create
+      x-noahark-csrf: true
+      description: >
+        Uses the Purchasing vendor-role service. Authorization is tenant-wide.
+        Cross-entity or invisible assignment ids return NOT_FOUND. One VendorRole
+        per assignment. No second vendor master is created. Request
+        defaultCurrency is optional, non-null, and one of SGD/MYR/IDR.
+      parameters: [{ $ref: "#/components/parameters/tenantId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [assignmentId, code]
+              properties:
+                assignmentId: { type: string }
+                code: { type: string, minLength: 1, maxLength: 64 }
+                defaultCurrency: { type: string, enum: [SGD, MYR, IDR] }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [vendorRole]
+                    properties:
+                      vendorRole: { $ref: "#/components/schemas/PartyRole" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /tenants/{tenantId}/vendor-roles/{roleId}:
+    get:
+      operationId: getVendorRole
+      tags: [VendorRoles]
+      security: [{ sessionCookie: [] }]
+      summary: Get a vendor role by id
+      x-noahark-permission: vendor_role:read
+      x-noahark-csrf: false
+      description: >
+        Authorization is tenant-wide. Invisible or missing ids return the same
+        NOT_FOUND envelope.
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/roleId" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [vendorRole]
+                    properties:
+                      vendorRole: { $ref: "#/components/schemas/PartyRole" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      operationId: updateVendorRole
+      tags: [VendorRoles]
+      security: [{ sessionCookie: [] }]
+      summary: Update a vendor role
+      x-noahark-permission: vendor_role:update
+      x-noahark-csrf: true
+      description: >
+        Authorization is tenant-wide. Uses the Purchasing service. Does not
+        alter Party fields, ownership or assignments.
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/roleId" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [expectedVersion]
+              properties:
+                expectedVersion: { $ref: "#/components/schemas/ExpectedVersion" }
+                code: { type: string, minLength: 1, maxLength: 64 }
+                defaultCurrency:
+                  type: [string, "null"]
+                  enum: [SGD, MYR, IDR, null]
+                status: { type: string, enum: [ACTIVE, SUSPENDED] }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [vendorRole]
+                    properties:
+                      vendorRole: { $ref: "#/components/schemas/PartyRole" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: CONFLICT or STALE_VERSION
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /tenants/{tenantId}/vendor-roles/{roleId}/archive:
+    post:
+      operationId: archiveVendorRole
+      tags: [VendorRoles]
+      security: [{ sessionCookie: [] }]
+      summary: Archive a vendor role
+      x-noahark-permission: vendor_role:archive
+      x-noahark-csrf: true
+      description: >
+        Authorization is tenant-wide. Body is a strict `{ expectedVersion }`
+        object. There is no HTTP DELETE.
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/roleId" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [expectedVersion]
+              properties:
+                expectedVersion: { $ref: "#/components/schemas/ExpectedVersion" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [vendorRole]
+                    properties:
+                      vendorRole: { $ref: "#/components/schemas/PartyRole" }
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
