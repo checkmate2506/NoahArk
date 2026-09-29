@@ -386,7 +386,7 @@ function writeTenantRoute(root: string, namespace: string, source: string): stri
 }
 
 describe("Phase-2 route boundary scanner", () => {
-  it("finds no Phase-2 offenders among discovered tenant routes (none exist yet)", () => {
+  it("finds no Phase-2 offenders among automatically discovered tenant routes", () => {
     expect(scanPhase2RouteTree(WEB_ROOT)).toEqual([]);
   });
 

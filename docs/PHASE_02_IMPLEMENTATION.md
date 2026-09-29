@@ -2860,3 +2860,296 @@ Accepted LOW findings:
 4. The route-boundary scanner cannot detect deliberately
    string-concatenated dynamic import specifiers. This is an accepted
    internal-code-review limitation.
+
+### P2D.3a — Catalog Category, UOM, CatalogItem and assignment APIs
+
+P2D.3a only. Fourteen route files, 22 operations, Catalog DTO helpers,
+safe public schema re-exports from `catalogDomain.ts`, OpenAPI fragments,
+and six integration files. Pricing, Custom Fields, UI, and P2D.5 were
+not started. There is no CatalogItem archive HTTP endpoint and no
+`archiveCatalogItem` domain service or permission.
+
+The original independent Sonnet P2D.3a audit result was **PASS**. It
+found no HIGH or MEDIUM defect. Three LOW findings were accepted for
+cleanup and are now **CLOSED**. The final focused Sonnet cleanup audit
+was **PASS**: no HIGH or MEDIUM finding; independently verified full
+integration **531/531** across 88 files. P2D.3a pre-commit readiness:
+**YES**. P2D.3b readiness: **YES**. P2D.3b was not started.
+
+#### Endpoint and permission inventory (22 operations)
+
+| Method | Path                                                | Permission                        | Constructor        | `legalEntityIdFrom`           | operationId                    |
+| ------ | --------------------------------------------------- | --------------------------------- | ------------------ | ----------------------------- | ------------------------------ |
+| GET    | `/catalog/categories`                               | `catalog_category:read`           | `tenantReadRoute`  | null (tenant-wide)            | `listCatalogCategories`        |
+| POST   | `/catalog/categories`                               | `catalog_category:create`         | `tenantWriteRoute` | null (tenant-wide)            | `createCatalogCategory`        |
+| GET    | `/catalog/categories/{categoryId}`                  | `catalog_category:read`           | `tenantReadRoute`  | null (tenant-wide)            | `getCatalogCategory`           |
+| PATCH  | `/catalog/categories/{categoryId}`                  | `catalog_category:update`         | `tenantWriteRoute` | null (tenant-wide)            | `updateCatalogCategory`        |
+| POST   | `/catalog/categories/{categoryId}/deactivate`       | `catalog_category:set_status`     | `tenantWriteRoute` | null (tenant-wide)            | `deactivateCatalogCategory`    |
+| POST   | `/catalog/categories/{categoryId}/activate`         | `catalog_category:set_status`     | `tenantWriteRoute` | null (tenant-wide)            | `activateCatalogCategory`      |
+| GET    | `/catalog/units-of-measure`                         | `unit_of_measure:read`            | `tenantReadRoute`  | null (tenant-wide)            | `listUnitsOfMeasure`           |
+| POST   | `/catalog/units-of-measure`                         | `unit_of_measure:create`          | `tenantWriteRoute` | null (tenant-wide)            | `createUnitOfMeasure`          |
+| GET    | `/catalog/units-of-measure/{unitId}`                | `unit_of_measure:read`            | `tenantReadRoute`  | null (tenant-wide)            | `getUnitOfMeasure`             |
+| PATCH  | `/catalog/units-of-measure/{unitId}`                | `unit_of_measure:update`          | `tenantWriteRoute` | null (tenant-wide)            | `updateUnitOfMeasure`          |
+| POST   | `/catalog/units-of-measure/{unitId}/deactivate`     | `unit_of_measure:set_status`      | `tenantWriteRoute` | null (tenant-wide)            | `deactivateUnitOfMeasure`      |
+| POST   | `/catalog/units-of-measure/{unitId}/activate`       | `unit_of_measure:set_status`      | `tenantWriteRoute` | null (tenant-wide)            | `activateUnitOfMeasure`        |
+| GET    | `/catalog/items`                                    | `catalog_item:read`               | `tenantReadRoute`  | null (tenant-wide)            | `listCatalogItems`             |
+| POST   | `/catalog/items`                                    | `catalog_item:create`             | `tenantWriteRoute` | body `ownerLegalEntityId`     | `createCatalogItem`            |
+| GET    | `/catalog/items/{catalogItemId}`                    | `catalog_item:read`               | `tenantReadRoute`  | null (tenant-wide)            | `getCatalogItem`               |
+| PATCH  | `/catalog/items/{catalogItemId}`                    | `catalog_item:update`             | `tenantWriteRoute` | null (tenant-wide)            | `updateCatalogItem`            |
+| POST   | `/catalog/items/{catalogItemId}/ownership-transfer` | `catalog_item:transfer_ownership` | `tenantWriteRoute` | null (tenant-wide)            | `transferCatalogItemOwnership` |
+| GET    | `/catalog/item-assignments`                         | `catalog_item_assignment:read`    | `tenantReadRoute`  | query `legalEntityId` or null | `listCatalogItemAssignments`   |
+| POST   | `/catalog/item-assignments`                         | `catalog_item_assignment:create`  | `tenantWriteRoute` | body `legalEntityId`          | `createCatalogItemAssignment`  |
+| GET    | `/catalog/item-assignments/{assignmentId}`          | `catalog_item_assignment:read`    | `tenantReadRoute`  | null (tenant-wide)            | `getCatalogItemAssignment`     |
+| PATCH  | `/catalog/item-assignments/{assignmentId}`          | `catalog_item_assignment:update`  | `tenantWriteRoute` | null (tenant-wide)            | `updateCatalogItemAssignment`  |
+| POST   | `/catalog/item-assignments/{assignmentId}/archive`  | `catalog_item_assignment:archive` | `tenantWriteRoute` | null (tenant-wide)            | `archiveCatalogItemAssignment` |
+
+No DELETE. No CatalogItem archive. No Category/UOM hard delete. No
+assignment delete. No `tenantReadPostRoute`. No Pricing paths. Routes
+do not import `apiHandler`, `resolveTenantContext`, `authorize`,
+privileged DB clients, `$transaction`, Prisma/SQLSTATE mapping, or
+audit writers. Each route calls exactly one intended domain operation.
+
+#### T-3 authorization choices
+
+- Every Category and UnitOfMeasure operation is tenant-wide
+  (`legalEntityId` null). Entity-scoped neighbouring keys are 403.
+- CatalogItem list, get, update and ownership-transfer are tenant-wide.
+  Update/transfer still require the current owner in trusted legal-entity
+  scope inside the domain. Assigned non-owners who can read receive 403,
+  not a false 404.
+- CatalogItem create authorizes the validated body's
+  `ownerLegalEntityId`. Entity-scoped `catalog_item:create` for B cannot
+  create for A. Forged body `permissions` / `actingUserId` / `requestId`
+  / `legalEntityIds` do not grant authority.
+- Item-assignment create authorizes the validated body's
+  `legalEntityId`. Unfiltered assignment list requires tenant-wide
+  `catalog_item_assignment:read`. An explicit validated `legalEntityId`
+  query filter may succeed with entity-scoped read for that entity.
+  Id-derived get/update/archive remain tenant-wide. Extra `legalEntityId`
+  is not accepted on id-based operations. Routes do not pre-read rows
+  before authorization and do not reconstruct `AccessContext` from JSON.
+- Ownership transfer uses tenant-wide permission. The domain
+  independently requires both the old owner and `newOwnerLegalEntityId`
+  in trusted scope.
+
+#### Category and UOM lifecycle (1-A)
+
+Tenant-wide reference data. Non-empty legal-entity scope is still
+required by the domain. `code` is immutable after creation (raw-body
+`code` on update is VALIDATION_FAILED before schema strip). Optimistic
+`expectedVersion` is required for update/status. Explicit activate /
+deactivate only; no hard delete. Deactivation does not rewrite existing
+CatalogItems. Inactive Category/UOM cannot be used for a new or changed
+reference (`Category is not available` / `Unit of measure is not
+available`). Unchanged existing references remain valid. There is no
+reference-count guard. Already-inactive / already-active transitions
+return VALIDATION_FAILED. Duplicate code returns 409 CONFLICT. Stale
+version returns 409 STALE_VERSION. Invisible/cross-tenant ids return
+404 with the same envelope as missing ids.
+
+Domain Category/UOM/item/assignment create and update schemas are not
+`.strict()`: unknown keys are stripped and cannot change authority or
+mutation targets. Status and archive routes use route-owned
+`ExpectedVersionBodySchema.strict()`.
+
+#### CatalogItem atomic bootstrap and owner-write
+
+Create atomically writes the item plus the first owner assignment and
+returns `{ item, assignment }`. UOM is required and must be ACTIVE.
+Category is optional but must be ACTIVE when supplied. Create never
+leaves an unassigned CatalogItem. `ownerLegalEntityId` comes from
+validated input and trusted scope. Update body contains no
+`ownerLegalEntityId`; extra owner fields are stripped and cannot
+transfer ownership. Update distinguishes absent from explicit null for
+nullable fields (`description`, `categoryId`, `taxCategoryCode`).
+Category/UOM revalidation occurs only when the reference changes.
+Assigned non-owners can read; update is 403. Unrelated entity and
+cross-tenant ids are 404. There is no CatalogItem archive endpoint.
+
+#### Ownership transfer
+
+Tenant-wide permission plus domain checks that both old and new owners
+are in trusted scope. Transfer does not change assignment rows. The
+service takes the catalog-item assignment advisory key before the
+master-row `FOR UPDATE` lock. Concurrent transfers with the same
+`expectedVersion` yield exactly one 200 and one 409 STALE_VERSION, one
+owner/version change, an unchanged assignment set, exactly one
+`catalog_item.ownership_transferred` audit, and a valid gapless chain.
+Handlers/assertions are attached before the promises can settle.
+
+#### Item-assignment invariants
+
+Create requires the target legal entity in trusted scope. The item must
+already be visible through owner-or-assigned RLS; invisible items return
+404 with no row and no audit. Create uses the shared catalog-item
+assignment advisory key and does not take a master-row `FOR UPDATE`
+lock. Duplicate item/legal-entity pairs return 409, including after
+archive (archived uniqueness is permanent; archived `entityItemCode`
+remains reserved). There is no revive and no hard delete. Update/archive
+require the row legal entity in trusted scope. Leaving ACTIVE is subject
+to the unconditional last-ACTIVE guard. Under partial legal-entity
+scope the guard may conservatively over-refuse; this is accepted ADR-77
+behaviour and is not treated as a defect.
+
+#### Pagination
+
+Category, UOM and CatalogItem lists are cursor-paginated
+`(createdAt desc, id desc)` with default 25, cap 100, values above 100
+accepted and capped. Assignment lists use `(createdAt asc, id asc)` and
+the HTTP envelope `{ assignments, nextCursor }` (domain `{ items,
+nextCursor }`). Unknown query keys, repeated singleton keys, malformed
+boolean/integer/limit, non-positive limit and invalid cursors return 422. Filters cannot widen trusted scope. Item filters cover `itemType`,
+`status`/`includeArchived`, `categoryId` and `q`. Assignment filters
+cover `catalogItemId` and `legalEntityId`. Pagination rows were seeded
+through the domain so HTTP write-rate limits did not invalidate setup.
+
+#### Isolation and non-enumeration
+
+In-scope success, assigned non-owner CatalogItem read, assigned
+non-owner update 403, unrelated entity and cross-tenant 404, matching
+missing/out-of-scope/cross-tenant envelopes, forged tenant path 403,
+empty legal-entity scope 403, request fields cannot widen legal-entity
+scope, rejected operations leave state and audit counts unchanged.
+Responses do not expose Prisma codes, SQLSTATE, constraint/index names,
+inaccessible owner/entity ids, or versions for invisible records.
+
+#### Audit and rollback
+
+Verified representative actions: `catalog_category.created` / `.updated`
+/ `.deactivated` / `.activated`; `unit_of_measure.created` / `.updated`
+/ `.deactivated` / `.activated`; `catalog_item.created` / `.updated` /
+`.ownership_transferred`; `catalog_item_assignment.created` / `.updated`
+/ `.archived`. Routes do not write audits. Item creation also produces
+the committed first-assignment audit. Stale/conflict/forbidden/not-found
+/validation failures add no mutation audit. Duplicate code/assignment
+failures roll back mutation and audit. Actor, tenant and request id
+come from trusted context. Forged body authority/actor/request fields
+do not affect audit rows. Chains are valid and gapless.
+
+#### Concurrency
+
+- Two ownership transfers with the same `expectedVersion`: one 200, one
+  409 STALE_VERSION.
+- Concurrent archives of two ACTIVE assignments cannot leave zero
+  ACTIVE (one 200, one 409 CONFLICT).
+- Serial last-ACTIVE update/archive rejection after the other ACTIVE
+  rows are archived.
+- Create-assignment versus ownership-transfer in both committed
+  orderings via the real HTTP handlers: concurrent create+transfer both
+  succeed without deadlock; sequential transfer then create still
+  succeeds while the item remains visible through the original owner
+  assignment. That HTTP coverage is the **positive** ordering.
+- The **negative** visibility-loss ordering already existed at the
+  domain layer in
+  `apps/web/tests/integration/catalogDomainConcurrency.test.ts` C-18
+  (assignment-create from a B+C scope against an item owned by B with
+  assignment set `{A}`, while ownership moves B → D). A new
+  HTTP-handler-level regression test now reproduces that negative case
+  through the exported assignment-create and ownership-transfer routes,
+  coordinating on the production advisory key
+  `catalog-item-assignments:<tenantId>:<catalogItemId>`. The route-level
+  outcome is NOT_FOUND, no C assignment row, no
+  `catalog_item_assignment.created` audit, exactly one added
+  `catalog_item.ownership_transferred` audit, owner B → D once, version
+  incremented once, unchanged assignment set, and a valid gapless chain.
+
+Primary file `catalogApiConcurrency.test.ts` (4 tests) ran five
+consecutive clean times.
+
+#### CSRF, write limiting and trusted audit identity
+
+Forged `Origin: https://evil.example` covers Category create and
+deactivate, UOM update, CatalogItem create/update, ownership transfer,
+and item-assignment archive. Every rejected CSRF request is 403 with no
+mutation, no audit, and no tenant-user or tenant write-bucket
+consumption. Authorized writes increment both buckets exactly once.
+
+#### OpenAPI
+
+All 22 operations are documented with the exact operationIds above.
+Success projections and envelopes are closed with
+`additionalProperties: false`. Timestamps are strings. Nullable output
+fields include literal `null` in enum where relevant (`CatalogItem`
+nullable fields; assignment `entityItemCode`/`archivedAt`). Nested
+response validation via `openapiResponseValidator.ts` covers real 2xx
+bodies for all 22 operations. Non-vacuity covers inactive `isActive`,
+nullable CatalogItem `description`, and assignment `status` enum.
+Validator limitation retained: `pattern`, numeric bounds and `format`
+remain deferred to P2D.5. No DELETE. No Pricing path.
+
+#### Path inventory (25)
+
+1–14. Fourteen `route.ts` files under
+`apps/web/app/api/v1/tenants/[tenantId]/catalog/` 15. `apps/web/lib/api/schemas/catalogSchemas.ts` 16. `apps/web/lib/services/catalogDomain.ts` (schema re-exports only) 17. `apps/web/openapi.yaml` 18. `apps/web/tests/integration/catalogApi.test.ts` 19. `apps/web/tests/integration/catalogApiItems.test.ts` 20. `apps/web/tests/integration/catalogApiAssignments.test.ts` 21. `apps/web/tests/integration/catalogApiPermissions.test.ts` 22. `apps/web/tests/integration/catalogApiIsolation.test.ts` 23. `apps/web/tests/integration/catalogApiConcurrency.test.ts` 24. `docs/PHASE_02_IMPLEMENTATION.md` 25. `apps/web/lib/api/routeBoundary.test.ts` (stale “none exist yet”
+description only; scanner assertions unchanged)
+
+Automatic discovery covers all 14 catalog routes (GET →
+`tenantReadRoute`, POST/PATCH → `tenantWriteRoute`).
+
+#### Test counts
+
+- Default Prettier `--check` on the P2D.3a paths: exit 0
+- `git diff --check`: exit 0
+- `pnpm turbo run lint --filter=@noahark/web --force`: exit 0
+- `pnpm turbo run typecheck --filter=@noahark/web --force`: exit 0
+- `@noahark/web` unit **121/121** (13 files), including
+  `routeBoundary.test.ts` **10/10**
+- Catalog API integration **12/12** (6 files)
+- `partyApi*.test.ts` **14/14** (6 files)
+- P2D.2b assignment/role integration **11/11** (6 files)
+- `catalogDomain*.test.ts` **19/19** (6 files)
+- Catalog assignment/transfer concurrency file **5/5** consecutive runs
+  (4 tests each run)
+- `apiRateLimit.test.ts` **12/12**
+- P2A six-file subset **61/61** (6 files)
+- OpenAPI validate exit 0; conformance **5/5**
+- Full `@noahark/web` integration **531/531** (88 files) on PostgreSQL
+  **18.4** (`x86_64-windows`, MSVC)
+- `pnpm --filter @noahark/web build` — Next.js **16.3.4**; restored
+  generated `apps/web/next-env.d.ts` to HEAD
+
+PostgreSQL **16.14**: UNVERIFIED (no schema or RLS change in this
+slice). Disposable `noahark_test_*` databases were dropped after every
+integration run. Persistent `noahark` was not reset, seeded, migrated
+or mutated.
+
+#### Initial failures and corrections
+
+1. First lint pass: unused `createCatalogItem` / `itemTransfer` imports
+   in `catalogApiIsolation.test.ts` and unused `errorCode` in
+   `catalogApiItems.test.ts`. Removed.
+2. `catalogApi.test.ts` read the stale-version Response body twice
+   (`Body is unusable`). The STALE_VERSION body is now captured once.
+3. First web unit run: `importBoundaries.test.ts` timed out at 5s
+   (unrelated ESLint scan). Immediate re-run **121/121**.
+4. Default Prettier `--write` reformatted the six new test files, two
+   route files and `openapi.yaml` before `--check` passed.
+5. LOW-finding cleanup: inserting advisory-lock helpers accidentally
+   dropped `errorCode`, so three concurrency tests threw
+   `ReferenceError`. The helper was restored; existing positive tests
+   were otherwise unchanged.
+
+#### Dependency audit (point-in-time)
+
+- `pnpm audit --prod`: 7 advisories (1 moderate, 6 high) through Prisma
+  7.9.1 `mysql2` / `deepmerge-ts` / `fast-uri`. Unchanged hold; no
+  `pnpm audit --fix`.
+- `pnpm audit`: 8 advisories (1 moderate, 7 high), same Prisma paths
+  plus `js-yaml` via swagger-parser. Unchanged hold.
+
+#### Protected surfaces
+
+No change to `packages/catalog` production services, `packages/audit`,
+`packages/authz`, limiter or tenant-route foundation,
+`packages/db/prisma/**`, schema/migrations/RLS/grants, permission
+catalogue, manifests, `pnpm-lock.yaml`, UI, ADR history, Pricing
+routes, Custom-Field routes, or P2D.5 work. `catalogDomain.ts` only
+re-exports already-committed public schemas. `routeBoundary.test.ts`
+was not weakened: only the stale “none exist yet” description was
+replaced so it states that automatically discovered Phase-2 tenant
+routes are scanned.
+
+P2D.3b has not started. Final focused Sonnet P2D.3a cleanup audit:
+**PASS**. All three original LOW findings are closed. No HIGH or MEDIUM
+finding. Independently verified full integration: **531/531** across 88
+files. P2D.3a pre-commit readiness: **YES**. P2D.3b readiness: **YES**.

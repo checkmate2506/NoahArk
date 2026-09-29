@@ -4,10 +4,11 @@ info:
   version: "1"
   description: >
     Phase 1 foundation surface plus P2D.2a Party, PartyContact and
-    PartyAddress APIs and P2D.2b Party assignment, CustomerRole and
-    VendorRole APIs. Catalog, pricing, custom-field, accounting, payroll,
-    tax, invoicing and project endpoints are not part of this slice — see
-    docs/IMPLEMENTATION_ROADMAP.md.
+    PartyAddress APIs, P2D.2b Party assignment, CustomerRole and
+    VendorRole APIs, and P2D.3a Catalog Category, UnitOfMeasure,
+    CatalogItem and CatalogItem-assignment APIs. Pricing, custom-field,
+    accounting, payroll, tax, invoicing and project endpoints are not
+    part of this slice — see docs/IMPLEMENTATION_ROADMAP.md.
 
 
     **Authentication**: an opaque, HttpOnly, database-backed session cookie
@@ -428,6 +429,117 @@ components:
         version: { type: integer, minimum: 1 }
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
+    CatalogCategory:
+      type: object
+      additionalProperties: false
+      description: >
+        Tenant-wide catalog category. Inactive (`isActive` false) rows cannot
+        be used for new or changed CatalogItem references (1-A). Existing
+        items that already reference an inactive category remain valid.
+        There is no hard delete.
+      required: [id, code, name, isActive, version, createdAt, updatedAt]
+      properties:
+        id: { type: string }
+        code: { type: string }
+        name: { type: string }
+        isActive: { type: boolean }
+        version: { type: integer, minimum: 1 }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    UnitOfMeasure:
+      type: object
+      additionalProperties: false
+      description: >
+        Tenant-wide unit of measure. Inactive rows cannot be used for new or
+        changed CatalogItem `baseUomId` references (1-A). Existing items that
+        already reference an inactive UOM remain valid. There is no hard
+        delete.
+      required: [id, code, name, isActive, version, createdAt, updatedAt]
+      properties:
+        id: { type: string }
+        code: { type: string }
+        name: { type: string }
+        isActive: { type: boolean }
+        version: { type: integer, minimum: 1 }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    CatalogItem:
+      type: object
+      additionalProperties: false
+      description: >
+        Catalog item master. Assigned non-owners may read; only the current
+        owner legal entity may update or transfer. There is no CatalogItem
+        archive HTTP endpoint. `description`, `categoryId`, `taxCategoryCode`
+        and `archivedAt` are nullable.
+      required:
+        [
+          id,
+          ownerLegalEntityId,
+          code,
+          itemType,
+          name,
+          description,
+          categoryId,
+          baseUomId,
+          taxCategoryCode,
+          isSellable,
+          isPurchasable,
+          status,
+          archivedAt,
+          version,
+          createdAt,
+          updatedAt,
+        ]
+      properties:
+        id: { type: string }
+        ownerLegalEntityId: { type: string }
+        code: { type: string }
+        itemType: { type: string, enum: [PRODUCT, SERVICE] }
+        name: { type: string }
+        description: { type: [string, "null"] }
+        categoryId: { type: [string, "null"] }
+        baseUomId: { type: string }
+        taxCategoryCode: { type: [string, "null"] }
+        isSellable: { type: boolean }
+        isPurchasable: { type: boolean }
+        status: { type: string, enum: [ACTIVE, ARCHIVED] }
+        archivedAt: { type: [string, "null"], format: date-time }
+        version: { type: integer, minimum: 1 }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    CatalogItemAssignment:
+      type: object
+      additionalProperties: false
+      description: >
+        CatalogItem legal-entity assignment. Leaving the last ACTIVE
+        assignment is refused. Under partial legal-entity scope the
+        last-ACTIVE guard may conservatively over-refuse (ADR-77). Archived
+        assignments are permanent; archived `entityItemCode` remains reserved.
+        There is no revive or hard-delete operation.
+      required:
+        [
+          id,
+          catalogItemId,
+          legalEntityId,
+          entityItemCode,
+          status,
+          assignedAt,
+          archivedAt,
+          version,
+          createdAt,
+          updatedAt,
+        ]
+      properties:
+        id: { type: string }
+        catalogItemId: { type: string }
+        legalEntityId: { type: string }
+        entityItemCode: { type: [string, "null"] }
+        status: { type: string, enum: [ACTIVE, SUSPENDED, ARCHIVED] }
+        assignedAt: { type: string, format: date-time }
+        archivedAt: { type: [string, "null"], format: date-time }
+        version: { type: integer, minimum: 1 }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
     PartyContact:
       type: object
       additionalProperties: false
@@ -620,6 +732,59 @@ components:
         Optional assignment-list filter. When present, authorization uses this
         legal entity (entity-scoped `party_assignment:read` may succeed). When
         omitted, the list requires tenant-wide `party_assignment:read`.
+    categoryId:
+      name: categoryId
+      in: path
+      required: true
+      schema: { type: string }
+    unitId:
+      name: unitId
+      in: path
+      required: true
+      schema: { type: string }
+    catalogItemId:
+      name: catalogItemId
+      in: path
+      required: true
+      schema: { type: string }
+    catalogPageLimit:
+      name: limit
+      in: query
+      required: false
+      schema: { type: integer }
+      description: >
+        Optional page size. Omitted values use 25. Positive safe integers above
+        100 are accepted and capped to 100. Malformed, non-positive, unsafe or
+        repeated values return VALIDATION_FAILED.
+    catalogListIsActive:
+      name: isActive
+      in: query
+      required: false
+      schema: { type: boolean }
+      description: >
+        Category/UOM list filter. Must be the strings `true` or `false` when
+        present. Default is true (active rows only).
+    catalogListQ:
+      name: q
+      in: query
+      required: false
+      schema: { type: string, maxLength: 200 }
+    catalogAssignmentListCatalogItemId:
+      name: catalogItemId
+      in: query
+      required: false
+      schema: { type: string }
+      description: Optional assignment-list filter. Does not widen trusted scope.
+    catalogAssignmentListLegalEntityId:
+      name: legalEntityId
+      in: query
+      required: false
+      schema: { type: string }
+      description: >
+        Optional CatalogItem-assignment list filter. When present, authorization
+        uses this legal entity (entity-scoped `catalog_item_assignment:read` may
+        succeed). When omitted, the list requires tenant-wide
+        `catalog_item_assignment:read`.
   responses:
     Unauthorized:
       description: No valid session (UNAUTHENTICATED)
@@ -3736,6 +3901,1125 @@ paths:
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/StaleVersion"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /tenants/{tenantId}/catalog/categories:
+    get:
+      operationId: listCatalogCategories
+      tags: [CatalogCategories]
+      security: [{ sessionCookie: [] }]
+      summary: List catalog categories
+      x-noahark-permission: catalog_category:read
+      x-noahark-csrf: false
+      description: >
+        Tenant-wide reference data. Authorization uses `legalEntityId` null.
+        Empty legal-entity scope fails closed at the domain. Pagination is
+        `(createdAt desc, id desc)` with default page size 25 and maximum
+        returned page size 100. Positive safe integers above 100 are accepted
+        and capped. Default `isActive` is true. Inactive categories cannot be
+        used for new or changed CatalogItem references (1-A); existing items
+        remain historically valid. There is no hard delete.
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/cursor" }
+        - { $ref: "#/components/parameters/catalogPageLimit" }
+        - { $ref: "#/components/parameters/catalogListIsActive" }
+        - { $ref: "#/components/parameters/catalogListQ" }
+      responses:
+        "200":
+          description: "{ data: { categories, nextCursor } }"
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [categories, nextCursor]
+                    properties:
+                      categories:
+                        type: array
+                        items: { $ref: "#/components/schemas/CatalogCategory" }
+                      nextCursor: { type: [string, "null"] }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+    post:
+      operationId: createCatalogCategory
+      tags: [CatalogCategories]
+      security: [{ sessionCookie: [] }]
+      summary: Create a catalog category
+      x-noahark-permission: catalog_category:create
+      x-noahark-csrf: true
+      description: >
+        Tenant-wide create. Duplicate `code` returns CONFLICT. `code` is
+        immutable after creation.
+      parameters: [{ $ref: "#/components/parameters/tenantId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code, name]
+              properties:
+                code: { type: string, minLength: 1, maxLength: 32 }
+                name: { type: string, minLength: 1, maxLength: 120 }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [category]
+                    properties:
+                      category: { $ref: "#/components/schemas/CatalogCategory" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /tenants/{tenantId}/catalog/categories/{categoryId}:
+    get:
+      operationId: getCatalogCategory
+      tags: [CatalogCategories]
+      security: [{ sessionCookie: [] }]
+      summary: Get a catalog category by id
+      x-noahark-permission: catalog_category:read
+      x-noahark-csrf: false
+      description: >
+        Tenant-wide get. Invisible or cross-tenant ids return the same
+        NOT_FOUND envelope.
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/categoryId" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [category]
+                    properties:
+                      category: { $ref: "#/components/schemas/CatalogCategory" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      operationId: updateCatalogCategory
+      tags: [CatalogCategories]
+      security: [{ sessionCookie: [] }]
+      summary: Update a catalog category
+      x-noahark-permission: catalog_category:update
+      x-noahark-csrf: true
+      description: >
+        Tenant-wide update. `code` is immutable. Optimistic `expectedVersion`
+        is required. Stale version returns STALE_VERSION. Extra unknown body
+        keys are stripped by the domain schema and cannot change the mutation
+        target.
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/categoryId" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [expectedVersion]
+              properties:
+                expectedVersion: { $ref: "#/components/schemas/ExpectedVersion" }
+                name: { type: string, minLength: 1, maxLength: 120 }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [category]
+                    properties:
+                      category: { $ref: "#/components/schemas/CatalogCategory" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/StaleVersion"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /tenants/{tenantId}/catalog/categories/{categoryId}/deactivate:
+    post:
+      operationId: deactivateCatalogCategory
+      tags: [CatalogCategories]
+      security: [{ sessionCookie: [] }]
+      summary: Deactivate a catalog category
+      x-noahark-permission: catalog_category:set_status
+      x-noahark-csrf: true
+      description: >
+        Tenant-wide status change. Body is a strict `{ expectedVersion }`
+        object. Deactivation does not rewrite existing CatalogItems. Inactive
+        categories cannot be used for new or changed references (1-A). There
+        is no reference-count guard and no hard delete. Already-inactive rows
+        return VALIDATION_FAILED.
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/categoryId" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [expectedVersion]
+              properties:
+                expectedVersion: { $ref: "#/components/schemas/ExpectedVersion" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [category]
+                    properties:
+                      category: { $ref: "#/components/schemas/CatalogCategory" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/StaleVersion"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /tenants/{tenantId}/catalog/categories/{categoryId}/activate:
+    post:
+      operationId: activateCatalogCategory
+      tags: [CatalogCategories]
+      security: [{ sessionCookie: [] }]
+      summary: Activate a catalog category
+      x-noahark-permission: catalog_category:set_status
+      x-noahark-csrf: true
+      description: >
+        Tenant-wide status change. Body is a strict `{ expectedVersion }`
+        object. Already-active rows return VALIDATION_FAILED.
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/categoryId" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [expectedVersion]
+              properties:
+                expectedVersion: { $ref: "#/components/schemas/ExpectedVersion" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [category]
+                    properties:
+                      category: { $ref: "#/components/schemas/CatalogCategory" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/StaleVersion"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /tenants/{tenantId}/catalog/units-of-measure:
+    get:
+      operationId: listUnitsOfMeasure
+      tags: [UnitsOfMeasure]
+      security: [{ sessionCookie: [] }]
+      summary: List units of measure
+      x-noahark-permission: unit_of_measure:read
+      x-noahark-csrf: false
+      description: >
+        Tenant-wide reference data. Authorization uses `legalEntityId` null.
+        Pagination is `(createdAt desc, id desc)` with default page size 25
+        and maximum 100. Default `isActive` is true. Inactive UOMs cannot be
+        used for new or changed CatalogItem `baseUomId` references (1-A);
+        existing items remain historically valid. There is no hard delete.
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/cursor" }
+        - { $ref: "#/components/parameters/catalogPageLimit" }
+        - { $ref: "#/components/parameters/catalogListIsActive" }
+        - { $ref: "#/components/parameters/catalogListQ" }
+      responses:
+        "200":
+          description: "{ data: { units, nextCursor } }"
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [units, nextCursor]
+                    properties:
+                      units:
+                        type: array
+                        items: { $ref: "#/components/schemas/UnitOfMeasure" }
+                      nextCursor: { type: [string, "null"] }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+    post:
+      operationId: createUnitOfMeasure
+      tags: [UnitsOfMeasure]
+      security: [{ sessionCookie: [] }]
+      summary: Create a unit of measure
+      x-noahark-permission: unit_of_measure:create
+      x-noahark-csrf: true
+      description: >
+        Tenant-wide create. Duplicate `code` returns CONFLICT. `code` is
+        immutable after creation.
+      parameters: [{ $ref: "#/components/parameters/tenantId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code, name]
+              properties:
+                code: { type: string, minLength: 1, maxLength: 32 }
+                name: { type: string, minLength: 1, maxLength: 120 }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [unit]
+                    properties:
+                      unit: { $ref: "#/components/schemas/UnitOfMeasure" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /tenants/{tenantId}/catalog/units-of-measure/{unitId}:
+    get:
+      operationId: getUnitOfMeasure
+      tags: [UnitsOfMeasure]
+      security: [{ sessionCookie: [] }]
+      summary: Get a unit of measure by id
+      x-noahark-permission: unit_of_measure:read
+      x-noahark-csrf: false
+      description: Tenant-wide get. Invisible or cross-tenant ids return NOT_FOUND.
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/unitId" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [unit]
+                    properties:
+                      unit: { $ref: "#/components/schemas/UnitOfMeasure" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      operationId: updateUnitOfMeasure
+      tags: [UnitsOfMeasure]
+      security: [{ sessionCookie: [] }]
+      summary: Update a unit of measure
+      x-noahark-permission: unit_of_measure:update
+      x-noahark-csrf: true
+      description: >
+        Tenant-wide update. `code` is immutable. Extra unknown body keys are
+        stripped by the domain schema and cannot change the mutation target.
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/unitId" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [expectedVersion]
+              properties:
+                expectedVersion: { $ref: "#/components/schemas/ExpectedVersion" }
+                name: { type: string, minLength: 1, maxLength: 120 }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [unit]
+                    properties:
+                      unit: { $ref: "#/components/schemas/UnitOfMeasure" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/StaleVersion"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /tenants/{tenantId}/catalog/units-of-measure/{unitId}/deactivate:
+    post:
+      operationId: deactivateUnitOfMeasure
+      tags: [UnitsOfMeasure]
+      security: [{ sessionCookie: [] }]
+      summary: Deactivate a unit of measure
+      x-noahark-permission: unit_of_measure:set_status
+      x-noahark-csrf: true
+      description: >
+        Tenant-wide status change. Body is a strict `{ expectedVersion }`
+        object. Deactivation does not rewrite existing CatalogItems. Inactive
+        UOMs cannot be used for new or changed references (1-A). There is no
+        reference-count guard and no hard delete.
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/unitId" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [expectedVersion]
+              properties:
+                expectedVersion: { $ref: "#/components/schemas/ExpectedVersion" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [unit]
+                    properties:
+                      unit: { $ref: "#/components/schemas/UnitOfMeasure" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/StaleVersion"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /tenants/{tenantId}/catalog/units-of-measure/{unitId}/activate:
+    post:
+      operationId: activateUnitOfMeasure
+      tags: [UnitsOfMeasure]
+      security: [{ sessionCookie: [] }]
+      summary: Activate a unit of measure
+      x-noahark-permission: unit_of_measure:set_status
+      x-noahark-csrf: true
+      description: >
+        Tenant-wide status change. Body is a strict `{ expectedVersion }`
+        object. Already-active rows return VALIDATION_FAILED.
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/unitId" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [expectedVersion]
+              properties:
+                expectedVersion: { $ref: "#/components/schemas/ExpectedVersion" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [unit]
+                    properties:
+                      unit: { $ref: "#/components/schemas/UnitOfMeasure" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/StaleVersion"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /tenants/{tenantId}/catalog/items:
+    get:
+      operationId: listCatalogItems
+      tags: [CatalogItems]
+      security: [{ sessionCookie: [] }]
+      summary: List catalog items visible to the caller
+      x-noahark-permission: catalog_item:read
+      x-noahark-csrf: false
+      description: >
+        Lists CatalogItem masters visible through RLS (owner or assigned legal
+        entity in the caller's scope). Authorization is tenant-wide
+        (`legalEntityId` null). Archived items are excluded unless
+        `includeArchived=true` or `status=ARCHIVED`. Pagination is
+        `(createdAt desc, id desc)` with default 25 and maximum 100.
+        Assigned non-owners may read. There is no CatalogItem archive HTTP
+        endpoint.
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/cursor" }
+        - { $ref: "#/components/parameters/catalogPageLimit" }
+        - name: itemType
+          in: query
+          schema: { type: string, enum: [PRODUCT, SERVICE] }
+        - name: status
+          in: query
+          schema: { type: string, enum: [ACTIVE, ARCHIVED] }
+        - name: includeArchived
+          in: query
+          schema: { type: boolean }
+          description: Must be the strings `true` or `false` when present.
+        - name: categoryId
+          in: query
+          schema: { type: string }
+        - name: q
+          in: query
+          schema: { type: string, maxLength: 200 }
+      responses:
+        "200":
+          description: "{ data: { items, nextCursor } }"
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [items, nextCursor]
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: "#/components/schemas/CatalogItem" }
+                      nextCursor: { type: [string, "null"] }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+    post:
+      operationId: createCatalogItem
+      tags: [CatalogItems]
+      security: [{ sessionCookie: [] }]
+      summary: Create a catalog item and its first owner assignment atomically
+      x-noahark-permission: catalog_item:create
+      x-noahark-csrf: true
+      description: >
+        Authorization uses the validated body's `ownerLegalEntityId`.
+        Entity-scoped `catalog_item:create` succeeds only for that legal
+        entity. The response contains both `item` and `assignment`. Create
+        never leaves an unassigned CatalogItem. `baseUomId` is required and
+        must be ACTIVE. `categoryId` is optional but must be ACTIVE when
+        supplied. Inactive Category/UOM cannot be used for this create (1-A).
+      parameters: [{ $ref: "#/components/parameters/tenantId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ownerLegalEntityId, code, itemType, name, baseUomId]
+              properties:
+                ownerLegalEntityId: { type: string }
+                code: { type: string, minLength: 1, maxLength: 64 }
+                itemType: { type: string, enum: [PRODUCT, SERVICE] }
+                name: { type: string, minLength: 1, maxLength: 200 }
+                description: { type: string, maxLength: 2000 }
+                categoryId: { type: string }
+                baseUomId: { type: string }
+                taxCategoryCode: { type: string, maxLength: 64 }
+                isSellable: { type: boolean }
+                isPurchasable: { type: boolean }
+                entityItemCode: { type: string, minLength: 1, maxLength: 64 }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [item, assignment]
+                    properties:
+                      item: { $ref: "#/components/schemas/CatalogItem" }
+                      assignment: { $ref: "#/components/schemas/CatalogItemAssignment" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /tenants/{tenantId}/catalog/items/{catalogItemId}:
+    get:
+      operationId: getCatalogItem
+      tags: [CatalogItems]
+      security: [{ sessionCookie: [] }]
+      summary: Get a catalog item by id
+      x-noahark-permission: catalog_item:read
+      x-noahark-csrf: false
+      description: >
+        Authorization is tenant-wide. Assigned non-owners may read. Invisible
+        or cross-tenant ids return the same NOT_FOUND envelope. There is no
+        CatalogItem archive HTTP endpoint.
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/catalogItemId" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [item]
+                    properties:
+                      item: { $ref: "#/components/schemas/CatalogItem" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      operationId: updateCatalogItem
+      tags: [CatalogItems]
+      security: [{ sessionCookie: [] }]
+      summary: Update a catalog item
+      x-noahark-permission: catalog_item:update
+      x-noahark-csrf: true
+      description: >
+        Authorization is tenant-wide. The domain independently requires the
+        current owner legal entity in trusted scope. Assigned non-owners who
+        can read the item receive FORBIDDEN, not a false NOT_FOUND. The body
+        contains no `ownerLegalEntityId`; extra owner fields are stripped and
+        cannot transfer ownership. Nullable fields distinguish absent from
+        explicit null. Category/UOM revalidation occurs only when the
+        reference changes. Inactive Category/UOM cannot be newly referenced
+        (1-A).
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/catalogItemId" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [expectedVersion]
+              properties:
+                expectedVersion: { $ref: "#/components/schemas/ExpectedVersion" }
+                code: { type: string, minLength: 1, maxLength: 64 }
+                name: { type: string, minLength: 1, maxLength: 200 }
+                description: { type: [string, "null"], maxLength: 2000 }
+                categoryId: { type: [string, "null"] }
+                baseUomId: { type: string }
+                taxCategoryCode: { type: [string, "null"], maxLength: 64 }
+                isSellable: { type: boolean }
+                isPurchasable: { type: boolean }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [item]
+                    properties:
+                      item: { $ref: "#/components/schemas/CatalogItem" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/StaleVersion"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /tenants/{tenantId}/catalog/items/{catalogItemId}/ownership-transfer:
+    post:
+      operationId: transferCatalogItemOwnership
+      tags: [CatalogItems]
+      security: [{ sessionCookie: [] }]
+      summary: Transfer catalog-item ownership
+      x-noahark-permission: catalog_item:transfer_ownership
+      x-noahark-csrf: true
+      description: >
+        Authorization is tenant-wide. The domain independently requires both
+        the current owner and `newOwnerLegalEntityId` in trusted legal-entity
+        scope. Transfer does not change assignment rows. The service takes the
+        catalog-item assignment advisory key before the master-row FOR UPDATE
+        lock. Concurrent transfers with the same expectedVersion yield one 200
+        and one STALE_VERSION.
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/catalogItemId" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [newOwnerLegalEntityId, expectedVersion]
+              properties:
+                newOwnerLegalEntityId: { type: string }
+                expectedVersion: { $ref: "#/components/schemas/ExpectedVersion" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [item]
+                    properties:
+                      item: { $ref: "#/components/schemas/CatalogItem" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/StaleVersion"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /tenants/{tenantId}/catalog/item-assignments:
+    get:
+      operationId: listCatalogItemAssignments
+      tags: [CatalogItemAssignments]
+      security: [{ sessionCookie: [] }]
+      summary: List catalog-item assignments
+      x-noahark-permission: catalog_item_assignment:read
+      x-noahark-csrf: false
+      description: >
+        Cursor-paginated `(createdAt asc, id asc)` with default 25 and maximum
+        100. Unfiltered list authorizes tenant-wide. An explicit validated
+        `legalEntityId` filter authorizes that legal entity. Filters cannot
+        widen trusted scope. The HTTP envelope uses `assignments` (the domain
+        list returns `items`).
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/cursor" }
+        - { $ref: "#/components/parameters/catalogPageLimit" }
+        - { $ref: "#/components/parameters/catalogAssignmentListCatalogItemId" }
+        - { $ref: "#/components/parameters/catalogAssignmentListLegalEntityId" }
+      responses:
+        "200":
+          description: "{ data: { assignments, nextCursor } }"
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [assignments, nextCursor]
+                    properties:
+                      assignments:
+                        type: array
+                        items: { $ref: "#/components/schemas/CatalogItemAssignment" }
+                      nextCursor: { type: [string, "null"] }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+    post:
+      operationId: createCatalogItemAssignment
+      tags: [CatalogItemAssignments]
+      security: [{ sessionCookie: [] }]
+      summary: Create a catalog-item assignment
+      x-noahark-permission: catalog_item_assignment:create
+      x-noahark-csrf: true
+      description: >
+        Authorization uses the validated body's `legalEntityId`. The item must
+        already be visible to the caller through owner-or-assigned RLS.
+        Invisible items return NOT_FOUND with no row and no audit. Duplicate
+        item/legal-entity pairs return CONFLICT. Create uses the shared
+        catalog-item assignment advisory key and does not take a master-row
+        FOR UPDATE lock.
+      parameters: [{ $ref: "#/components/parameters/tenantId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [catalogItemId, legalEntityId]
+              properties:
+                catalogItemId: { type: string }
+                legalEntityId: { type: string }
+                entityItemCode: { type: string, minLength: 1, maxLength: 64 }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [assignment]
+                    properties:
+                      assignment: { $ref: "#/components/schemas/CatalogItemAssignment" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /tenants/{tenantId}/catalog/item-assignments/{assignmentId}:
+    get:
+      operationId: getCatalogItemAssignment
+      tags: [CatalogItemAssignments]
+      security: [{ sessionCookie: [] }]
+      summary: Get a catalog-item assignment by id
+      x-noahark-permission: catalog_item_assignment:read
+      x-noahark-csrf: false
+      description: >
+        Authorization is tenant-wide. The assignment legal entity is derived
+        only after the domain read. Extra `legalEntityId` path or body fields
+        are not accepted. Invisible ids return NOT_FOUND.
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/assignmentId" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [assignment]
+                    properties:
+                      assignment: { $ref: "#/components/schemas/CatalogItemAssignment" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      operationId: updateCatalogItemAssignment
+      tags: [CatalogItemAssignments]
+      security: [{ sessionCookie: [] }]
+      summary: Update a catalog-item assignment
+      x-noahark-permission: catalog_item_assignment:update
+      x-noahark-csrf: true
+      description: >
+        Authorization is tenant-wide. The domain requires the row legal entity
+        in trusted scope. Leaving ACTIVE is subject to the unconditional
+        last-ACTIVE guard (CONFLICT). Under partial legal-entity scope the
+        guard may conservatively over-refuse (ADR-77). Archived assignments
+        cannot be updated or revived.
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/assignmentId" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [expectedVersion]
+              properties:
+                expectedVersion: { $ref: "#/components/schemas/ExpectedVersion" }
+                status: { type: string, enum: [ACTIVE, SUSPENDED] }
+                entityItemCode: { type: [string, "null"] }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [assignment]
+                    properties:
+                      assignment: { $ref: "#/components/schemas/CatalogItemAssignment" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: CONFLICT or STALE_VERSION
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /tenants/{tenantId}/catalog/item-assignments/{assignmentId}/archive:
+    post:
+      operationId: archiveCatalogItemAssignment
+      tags: [CatalogItemAssignments]
+      security: [{ sessionCookie: [] }]
+      summary: Archive a catalog-item assignment
+      x-noahark-permission: catalog_item_assignment:archive
+      x-noahark-csrf: true
+      description: >
+        Authorization is tenant-wide. Body is a strict `{ expectedVersion }`
+        object. Archive is permanent under the existing uniqueness constraint;
+        archived `entityItemCode` remains reserved. There is no revive and no
+        HTTP DELETE. Leaving the last ACTIVE assignment is refused. Under
+        partial legal-entity scope the last-ACTIVE guard may conservatively
+        over-refuse (ADR-77).
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/assignmentId" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [expectedVersion]
+              properties:
+                expectedVersion: { $ref: "#/components/schemas/ExpectedVersion" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [assignment]
+                    properties:
+                      assignment: { $ref: "#/components/schemas/CatalogItemAssignment" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: CONFLICT or STALE_VERSION
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
         "422":
           $ref: "#/components/responses/ValidationFailed"
         "429":
