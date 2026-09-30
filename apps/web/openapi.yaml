@@ -5,10 +5,12 @@ info:
   description: >
     Phase 1 foundation surface plus P2D.2a Party, PartyContact and
     PartyAddress APIs, P2D.2b Party assignment, CustomerRole and
-    VendorRole APIs, and P2D.3a Catalog Category, UnitOfMeasure,
-    CatalogItem and CatalogItem-assignment APIs. Pricing, custom-field,
-    accounting, payroll, tax, invoicing and project endpoints are not
-    part of this slice — see docs/IMPLEMENTATION_ROADMAP.md.
+    VendorRole APIs, P2D.3a Catalog Category, UnitOfMeasure,
+    CatalogItem and CatalogItem-assignment APIs, and P2D.3b Price List,
+    Price List assignment, default selection, Price List entry and
+    effective-price APIs. Custom-field, accounting, payroll, tax,
+    invoicing and project endpoints are not part of this slice — see
+    docs/IMPLEMENTATION_ROADMAP.md.
 
 
     **Authentication**: an opaque, HttpOnly, database-backed session cookie
@@ -540,6 +542,183 @@ components:
         version: { type: integer, minimum: 1 }
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
+    PriceList:
+      type: object
+      additionalProperties: false
+      description: >
+        Price list master. Currency is SGD, MYR or IDR and is immutable after
+        create. Assigned non-owners may read; only the current owner legal
+        entity may update or transfer. There is no Price List archive HTTP
+        endpoint and no master-archive domain operation. Authorization for
+        get/update/transfer is tenant-wide (`legalEntityId` null).
+      required:
+        [
+          id,
+          ownerLegalEntityId,
+          code,
+          name,
+          currency,
+          status,
+          archivedAt,
+          version,
+          createdAt,
+          updatedAt,
+        ]
+      properties:
+        id: { type: string }
+        ownerLegalEntityId: { type: string }
+        code: { type: string }
+        name: { type: string }
+        currency: { type: string, enum: [SGD, MYR, IDR] }
+        status: { type: string, enum: [ACTIVE, ARCHIVED] }
+        archivedAt: { type: [string, "null"], format: date-time }
+        version: { type: integer, minimum: 1 }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    PriceListAssignment:
+      type: object
+      additionalProperties: false
+      description: >
+        Price List legal-entity assignment. Archive is permanent: the
+        `(priceListId, legalEntityId)` pair remains reserved, so the assignment
+        cannot be revived or recreated. Leaving ACTIVE clears `isDefault` in
+        the same domain update. Suspending or archiving the last ACTIVE
+        assignment returns 409. Authorization for id-derived get/update/archive
+        is tenant-wide. Routes never alter Price List ownership.
+      required:
+        [
+          id,
+          priceListId,
+          legalEntityId,
+          isDefault,
+          status,
+          assignedAt,
+          archivedAt,
+          version,
+          createdAt,
+          updatedAt,
+        ]
+      properties:
+        id: { type: string }
+        priceListId: { type: string }
+        legalEntityId: { type: string }
+        isDefault: { type: boolean }
+        status: { type: string, enum: [ACTIVE, SUSPENDED, ARCHIVED] }
+        assignedAt: { type: string, format: date-time }
+        archivedAt: { type: [string, "null"], format: date-time }
+        version: { type: integer, minimum: 1 }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    PriceListEntry:
+      type: object
+      additionalProperties: false
+      description: >
+        Price List entry. `unitPrice` is a canonical six-decimal JSON string,
+        never a number. `effectiveFrom` and `effectiveTo` are civil dates
+        (`YYYY-MM-DD`; no timezone). Inclusive overlap is rejected by the
+        PostgreSQL exclusion constraint and mapped to 409 CONFLICT. Adjacent
+        and single-day periods are accepted. Assignment identifiers are
+        immutable after create. Close is strict-shrink only. Authorization
+        for create/get/update/close is tenant-wide because legal entity is
+        derived from the two assignment rows. List may use an explicit
+        `legalEntityId` query filter for entity-scoped `price_list_entry:read`.
+      required:
+        [
+          id,
+          legalEntityId,
+          priceListAssignmentId,
+          catalogItemAssignmentId,
+          unitPrice,
+          effectiveFrom,
+          effectiveTo,
+          version,
+          createdAt,
+          updatedAt,
+        ]
+      properties:
+        id: { type: string }
+        legalEntityId: { type: string }
+        priceListAssignmentId: { type: string }
+        catalogItemAssignmentId: { type: string }
+        unitPrice:
+          type: string
+          pattern: "^(?:0|[1-9][0-9]{0,16})(?:\\.[0-9]{1,6})?$"
+          description: Canonical NUMERIC(23,6) decimal string. Never a JSON number.
+        effectiveFrom:
+          type: string
+          format: date
+          description: Civil date YYYY-MM-DD; no timezone.
+        effectiveTo:
+          type: [string, "null"]
+          format: date
+          description: Civil date YYYY-MM-DD; no timezone. Null means open-ended.
+        version: { type: integer, minimum: 1 }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    DefaultPriceListSelection:
+      type: object
+      additionalProperties: false
+      description: >
+        Result of `PUT /pricing/default-price-list`. The route calls
+        `setDefaultPriceList` once. There is no `expectedVersion`. Setting the
+        existing ACTIVE default or clearing when no default exists returns 422
+        with no write or audit.
+      required: [legalEntityId, previousPriceListId, priceListId]
+      properties:
+        legalEntityId: { type: string }
+        previousPriceListId: { type: [string, "null"] }
+        priceListId: { type: [string, "null"] }
+    EffectivePrice:
+      type: object
+      additionalProperties: false
+      description: >
+        Effective-price resolution. `onDate` is a mandatory civil date; it is
+        never defaulted to today. Unresolved covering rows return HTTP 200 with
+        `resolved` false and `unitPrice` null — not 404. Inactive list or item
+        assignment or master, missing default, and missing explicit list return
+        a uniform NOT_FOUND. Resolution writes no audit. `price:resolve` is
+        separate from `price_list_entry:read`. Authorization uses the validated
+        query `legalEntityId`.
+      required:
+        [
+          resolved,
+          unitPrice,
+          currency,
+          priceListId,
+          priceListAssignmentId,
+          catalogItemAssignmentId,
+          legalEntityId,
+          onDate,
+          entryId,
+          effectiveFrom,
+          effectiveTo,
+        ]
+      properties:
+        resolved: { type: boolean }
+        unitPrice:
+          type: [string, "null"]
+          pattern: "^(?:0|[1-9][0-9]{0,16})(?:\\.[0-9]{1,6})?$"
+          description: >
+            Canonical six-decimal string when resolved; JSON null when
+            unresolved. Never a JSON number.
+        currency: { type: string, enum: [SGD, MYR, IDR] }
+        priceListId: { type: string }
+        priceListAssignmentId: { type: string }
+        catalogItemAssignmentId: { type: string }
+        legalEntityId: { type: string }
+        onDate:
+          type: string
+          format: date
+          description: Civil date YYYY-MM-DD; no timezone. Mandatory query parameter.
+        entryId: { type: [string, "null"] }
+        effectiveFrom:
+          type: [string, "null"]
+          format: date
+          description: Civil date YYYY-MM-DD; no timezone.
+        effectiveTo:
+          type: [string, "null"]
+          format: date
+          description: Civil date YYYY-MM-DD; no timezone.
     PartyContact:
       type: object
       additionalProperties: false
@@ -785,6 +964,68 @@ components:
         uses this legal entity (entity-scoped `catalog_item_assignment:read` may
         succeed). When omitted, the list requires tenant-wide
         `catalog_item_assignment:read`.
+    priceListId:
+      name: priceListId
+      in: path
+      required: true
+      schema: { type: string }
+    entryId:
+      name: entryId
+      in: path
+      required: true
+      schema: { type: string }
+    priceListAssignmentListPriceListId:
+      name: priceListId
+      in: query
+      required: false
+      schema: { type: string }
+      description: Optional assignment-list filter. Does not widen trusted scope.
+    priceListAssignmentListLegalEntityId:
+      name: legalEntityId
+      in: query
+      required: false
+      schema: { type: string }
+      description: >
+        Optional Price List assignment-list filter. When present, authorization
+        uses this legal entity (entity-scoped `price_list_assignment:read` may
+        succeed). When omitted, the list requires tenant-wide
+        `price_list_assignment:read`.
+    priceListEntryListLegalEntityId:
+      name: legalEntityId
+      in: query
+      required: false
+      schema: { type: string }
+      description: >
+        Optional Price List entry-list filter. When present, authorization uses
+        this legal entity (entity-scoped `price_list_entry:read` may succeed).
+        When omitted, the list requires tenant-wide `price_list_entry:read`.
+    resolveLegalEntityId:
+      name: legalEntityId
+      in: query
+      required: true
+      schema: { type: string }
+      description: Trusted legal entity for `price:resolve` authorization.
+    resolveCatalogItemId:
+      name: catalogItemId
+      in: query
+      required: true
+      schema: { type: string }
+    resolveOnDate:
+      name: onDate
+      in: query
+      required: true
+      schema: { type: string, format: date }
+      description: >
+        Mandatory civil date YYYY-MM-DD; no timezone. Never defaulted to today.
+        Missing or malformed values return VALIDATION_FAILED.
+    resolvePriceListId:
+      name: priceListId
+      in: query
+      required: false
+      schema: { type: string }
+      description: >
+        Optional explicit Price List. When omitted, resolution uses the ACTIVE
+        default for the legal entity.
   responses:
     Unauthorized:
       description: No valid session (UNAUTHENTICATED)
@@ -5024,3 +5265,908 @@ paths:
           $ref: "#/components/responses/ValidationFailed"
         "429":
           $ref: "#/components/responses/RateLimited"
+
+  /tenants/{tenantId}/pricing/price-lists:
+    get:
+      operationId: listPriceLists
+      tags: [PriceLists]
+      security: [{ sessionCookie: [] }]
+      summary: List price lists visible to the caller
+      x-noahark-permission: price_list:read
+      x-noahark-csrf: false
+      description: >
+        Lists Price List masters visible through RLS (owner or assigned legal
+        entity in the caller's scope). Authorization is tenant-wide
+        (`legalEntityId` null). Archived lists are excluded unless
+        `includeArchived=true` or `status=ARCHIVED`. Pagination is
+        `(createdAt desc, id desc)` with default 25 and maximum 100.
+        Assigned non-owners may read. There is no Price List archive HTTP
+        endpoint.
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/cursor" }
+        - { $ref: "#/components/parameters/catalogPageLimit" }
+        - name: status
+          in: query
+          schema: { type: string, enum: [ACTIVE, ARCHIVED] }
+        - name: includeArchived
+          in: query
+          schema: { type: boolean }
+          description: Must be the strings `true` or `false` when present.
+        - name: currency
+          in: query
+          schema: { type: string, enum: [SGD, MYR, IDR] }
+        - { $ref: "#/components/parameters/catalogListQ" }
+      responses:
+        "200":
+          description: "{ data: { priceLists, nextCursor } }"
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [priceLists, nextCursor]
+                    properties:
+                      priceLists:
+                        type: array
+                        items: { $ref: "#/components/schemas/PriceList" }
+                      nextCursor: { type: [string, "null"] }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+    post:
+      operationId: createPriceList
+      tags: [PriceLists]
+      security: [{ sessionCookie: [] }]
+      summary: Create a price list and its first owner assignment atomically
+      x-noahark-permission: price_list:create
+      x-noahark-csrf: true
+      description: >
+        Authorization uses the validated body's `ownerLegalEntityId`.
+        Entity-scoped `price_list:create` succeeds only for that legal entity.
+        Currency must be SGD, MYR or IDR and is immutable after create. The
+        response contains both `priceList` and `assignment`. Create never
+        leaves an unassigned Price List.
+      parameters: [{ $ref: "#/components/parameters/tenantId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ownerLegalEntityId, code, name, currency]
+              properties:
+                ownerLegalEntityId: { type: string }
+                code: { type: string, minLength: 1, maxLength: 64 }
+                name: { type: string, minLength: 1, maxLength: 200 }
+                currency: { type: string, enum: [SGD, MYR, IDR] }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [priceList, assignment]
+                    properties:
+                      priceList: { $ref: "#/components/schemas/PriceList" }
+                      assignment: { $ref: "#/components/schemas/PriceListAssignment" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /tenants/{tenantId}/pricing/price-lists/{priceListId}:
+    get:
+      operationId: getPriceList
+      tags: [PriceLists]
+      security: [{ sessionCookie: [] }]
+      summary: Get a price list by id
+      x-noahark-permission: price_list:read
+      x-noahark-csrf: false
+      description: >
+        Authorization is tenant-wide. Assigned non-owners may read. Invisible
+        or cross-tenant ids return the same NOT_FOUND envelope. There is no
+        Price List archive HTTP endpoint.
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/priceListId" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [priceList]
+                    properties:
+                      priceList: { $ref: "#/components/schemas/PriceList" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      operationId: updatePriceList
+      tags: [PriceLists]
+      security: [{ sessionCookie: [] }]
+      summary: Update a price list
+      x-noahark-permission: price_list:update
+      x-noahark-csrf: true
+      description: >
+        Authorization is tenant-wide. The domain independently requires the
+        current owner legal entity in trusted scope. Assigned non-owners who
+        can read the list receive FORBIDDEN, not a false NOT_FOUND. The body
+        must not accept `currency` or `ownerLegalEntityId`.
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/priceListId" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [expectedVersion]
+              properties:
+                expectedVersion: { $ref: "#/components/schemas/ExpectedVersion" }
+                code: { type: string, minLength: 1, maxLength: 64 }
+                name: { type: string, minLength: 1, maxLength: 200 }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [priceList]
+                    properties:
+                      priceList: { $ref: "#/components/schemas/PriceList" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: STALE_VERSION
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /tenants/{tenantId}/pricing/price-lists/{priceListId}/ownership-transfer:
+    post:
+      operationId: transferPriceListOwnership
+      tags: [PriceLists]
+      security: [{ sessionCookie: [] }]
+      summary: Transfer price list ownership
+      x-noahark-permission: price_list:transfer_ownership
+      x-noahark-csrf: true
+      description: >
+        Authorization is tenant-wide. Dual-scope domain rules require the
+        current owner and the new owner in trusted legal-entity scope.
+        Assigned non-owners receive FORBIDDEN. Concurrent transfers with the
+        same expectedVersion yield one 200 and one 409 STALE_VERSION.
+        Assignment rows are not rewritten.
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/priceListId" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [newOwnerLegalEntityId, expectedVersion]
+              properties:
+                newOwnerLegalEntityId: { type: string }
+                expectedVersion: { $ref: "#/components/schemas/ExpectedVersion" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [priceList]
+                    properties:
+                      priceList: { $ref: "#/components/schemas/PriceList" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: STALE_VERSION
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /tenants/{tenantId}/pricing/price-list-assignments:
+    get:
+      operationId: listPriceListAssignments
+      tags: [PriceListAssignments]
+      security: [{ sessionCookie: [] }]
+      summary: List price list assignments
+      x-noahark-permission: price_list_assignment:read
+      x-noahark-csrf: false
+      description: >
+        Without `legalEntityId`, authorization is tenant-wide. An explicit
+        query `legalEntityId` uses entity-scoped authorization for that
+        trusted legal entity. Pagination is `(createdAt asc, id asc)` with
+        default 25 and maximum 100.
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/cursor" }
+        - { $ref: "#/components/parameters/catalogPageLimit" }
+        - { $ref: "#/components/parameters/priceListAssignmentListPriceListId" }
+        - { $ref: "#/components/parameters/priceListAssignmentListLegalEntityId" }
+      responses:
+        "200":
+          description: "{ data: { assignments, nextCursor } }"
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [assignments, nextCursor]
+                    properties:
+                      assignments:
+                        type: array
+                        items: { $ref: "#/components/schemas/PriceListAssignment" }
+                      nextCursor: { type: [string, "null"] }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+    post:
+      operationId: createPriceListAssignment
+      tags: [PriceListAssignments]
+      security: [{ sessionCookie: [] }]
+      summary: Assign a price list to a legal entity
+      x-noahark-permission: price_list_assignment:create
+      x-noahark-csrf: true
+      description: >
+        Authorization uses the validated body's `legalEntityId`. The Price
+        List must already be visible. Duplicate `(priceListId, legalEntityId)`,
+        including an archived pair, returns 409 because archive is permanent.
+        Assignment create takes the shared advisory key and does not lock the
+        Price List master with FOR UPDATE.
+      parameters: [{ $ref: "#/components/parameters/tenantId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [priceListId, legalEntityId]
+              properties:
+                priceListId: { type: string }
+                legalEntityId: { type: string }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [assignment]
+                    properties:
+                      assignment: { $ref: "#/components/schemas/PriceListAssignment" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /tenants/{tenantId}/pricing/price-list-assignments/{assignmentId}:
+    get:
+      operationId: getPriceListAssignment
+      tags: [PriceListAssignments]
+      security: [{ sessionCookie: [] }]
+      summary: Get a price list assignment by id
+      x-noahark-permission: price_list_assignment:read
+      x-noahark-csrf: false
+      description: >
+        Authorization is tenant-wide. Invisible or cross-tenant ids return the
+        same NOT_FOUND envelope.
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/assignmentId" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [assignment]
+                    properties:
+                      assignment: { $ref: "#/components/schemas/PriceListAssignment" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      operationId: updatePriceListAssignment
+      tags: [PriceListAssignments]
+      security: [{ sessionCookie: [] }]
+      summary: Update a price list assignment
+      x-noahark-permission: price_list_assignment:update
+      x-noahark-csrf: true
+      description: >
+        Authorization is tenant-wide. Leaving ACTIVE clears `isDefault` in the
+        same domain update. Suspending the last ACTIVE assignment returns 409.
+        Archived assignments cannot be updated. Routes do not alter Price List
+        ownership.
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/assignmentId" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [expectedVersion]
+              properties:
+                expectedVersion: { $ref: "#/components/schemas/ExpectedVersion" }
+                status: { type: string, enum: [ACTIVE, SUSPENDED] }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [assignment]
+                    properties:
+                      assignment: { $ref: "#/components/schemas/PriceListAssignment" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: CONFLICT or STALE_VERSION
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /tenants/{tenantId}/pricing/price-list-assignments/{assignmentId}/archive:
+    post:
+      operationId: archivePriceListAssignment
+      tags: [PriceListAssignments]
+      security: [{ sessionCookie: [] }]
+      summary: Archive a price list assignment permanently
+      x-noahark-permission: price_list_assignment:archive
+      x-noahark-csrf: true
+      description: >
+        Authorization is tenant-wide. Archive is permanent because the
+        `(priceListId, legalEntityId)` pair remains reserved. The assignment
+        cannot be revived or recreated. Archiving the last ACTIVE assignment
+        returns 409. `isDefault` is cleared in the same update. Body is the
+        strict `{ expectedVersion }` object.
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/assignmentId" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [expectedVersion]
+              properties:
+                expectedVersion: { $ref: "#/components/schemas/ExpectedVersion" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [assignment]
+                    properties:
+                      assignment: { $ref: "#/components/schemas/PriceListAssignment" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: CONFLICT or STALE_VERSION
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /tenants/{tenantId}/pricing/default-price-list:
+    put:
+      operationId: setDefaultPriceList
+      tags: [PriceListAssignments]
+      security: [{ sessionCookie: [] }]
+      summary: Set or clear the default price list for a legal entity
+      x-noahark-permission: price_list_assignment:set_default
+      x-noahark-csrf: true
+      description: >
+        Authorization uses the validated body's `legalEntityId`. Body is
+        strictly `{ legalEntityId, priceListId }` where `priceListId` may be
+        JSON null to clear. There is no `expectedVersion`. The route calls
+        `setDefaultPriceList` once and does not reproduce lock order. Setting
+        the existing ACTIVE default or clearing when no default exists returns
+        422 with no write or audit. Exactly one ACTIVE default remains after
+        a successful swap.
+      parameters: [{ $ref: "#/components/parameters/tenantId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [legalEntityId, priceListId]
+              properties:
+                legalEntityId: { type: string }
+                priceListId: { type: [string, "null"] }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [selection]
+                    properties:
+                      selection:
+                        { $ref: "#/components/schemas/DefaultPriceListSelection" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /tenants/{tenantId}/pricing/price-list-entries:
+    get:
+      operationId: listPriceListEntries
+      tags: [PriceListEntries]
+      security: [{ sessionCookie: [] }]
+      summary: List price list entries
+      x-noahark-permission: price_list_entry:read
+      x-noahark-csrf: false
+      description: >
+        Without `legalEntityId`, authorization is tenant-wide. An explicit
+        query `legalEntityId` uses entity-scoped authorization. Pagination is
+        `(effectiveFrom desc, id desc)` with default 25 and maximum 100.
+        Dates are civil dates; `unitPrice` is a decimal string.
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/cursor" }
+        - { $ref: "#/components/parameters/catalogPageLimit" }
+        - name: priceListAssignmentId
+          in: query
+          schema: { type: string }
+        - name: catalogItemAssignmentId
+          in: query
+          schema: { type: string }
+        - { $ref: "#/components/parameters/priceListEntryListLegalEntityId" }
+      responses:
+        "200":
+          description: "{ data: { entries, nextCursor } }"
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [entries, nextCursor]
+                    properties:
+                      entries:
+                        type: array
+                        items: { $ref: "#/components/schemas/PriceListEntry" }
+                      nextCursor: { type: [string, "null"] }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+    post:
+      operationId: createPriceListEntry
+      tags: [PriceListEntries]
+      security: [{ sessionCookie: [] }]
+      summary: Create a price list entry
+      x-noahark-permission: price_list_entry:create
+      x-noahark-csrf: true
+      description: >
+        Authorization is tenant-wide because legal entity is derived from the
+        two assignment rows and must not come from the request. `unitPrice` is
+        a JSON string. Inclusive overlap is rejected by PostgreSQL exclusion
+        and mapped to 409 CONFLICT. Adjacent and single-day periods are
+        accepted. Both assignments must be ACTIVE and belong to the same
+        legal entity; both masters must be ACTIVE. No Price List or Catalog
+        Item master lock is taken. Price List Assignment is shared-locked
+        before Catalog Item Assignment.
+      parameters: [{ $ref: "#/components/parameters/tenantId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                [
+                  priceListAssignmentId,
+                  catalogItemAssignmentId,
+                  unitPrice,
+                  effectiveFrom,
+                  effectiveTo,
+                ]
+              properties:
+                priceListAssignmentId: { type: string }
+                catalogItemAssignmentId: { type: string }
+                unitPrice:
+                  type: string
+                  pattern: "^(?:0|[1-9][0-9]{0,16})(?:\\.[0-9]{1,6})?$"
+                effectiveFrom:
+                  type: string
+                  format: date
+                  description: Civil date YYYY-MM-DD; no timezone.
+                effectiveTo:
+                  type: [string, "null"]
+                  format: date
+                  description: Civil date YYYY-MM-DD; no timezone. Null means open-ended.
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [entry]
+                    properties:
+                      entry: { $ref: "#/components/schemas/PriceListEntry" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Inclusive overlap or other CONFLICT
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /tenants/{tenantId}/pricing/price-list-entries/{entryId}:
+    get:
+      operationId: getPriceListEntry
+      tags: [PriceListEntries]
+      security: [{ sessionCookie: [] }]
+      summary: Get a price list entry by id
+      x-noahark-permission: price_list_entry:read
+      x-noahark-csrf: false
+      description: Authorization is tenant-wide.
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/entryId" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [entry]
+                    properties:
+                      entry: { $ref: "#/components/schemas/PriceListEntry" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      operationId: updatePriceListEntry
+      tags: [PriceListEntries]
+      security: [{ sessionCookie: [] }]
+      summary: Update a price list entry
+      x-noahark-permission: price_list_entry:update
+      x-noahark-csrf: true
+      description: >
+        Authorization is tenant-wide. Update may change `unitPrice` and may
+        change or clear `effectiveTo` while ACTIVE. Assignment identifiers
+        remain immutable. Inclusive overlap returns 409 CONFLICT.
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/entryId" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [expectedVersion]
+              properties:
+                expectedVersion: { $ref: "#/components/schemas/ExpectedVersion" }
+                unitPrice:
+                  type: string
+                  pattern: "^(?:0|[1-9][0-9]{0,16})(?:\\.[0-9]{1,6})?$"
+                effectiveFrom:
+                  type: string
+                  format: date
+                  description: Civil date YYYY-MM-DD; no timezone.
+                effectiveTo:
+                  type: [string, "null"]
+                  format: date
+                  description: Civil date YYYY-MM-DD; no timezone.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [entry]
+                    properties:
+                      entry: { $ref: "#/components/schemas/PriceListEntry" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: CONFLICT or STALE_VERSION
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /tenants/{tenantId}/pricing/price-list-entries/{entryId}/close:
+    post:
+      operationId: closePriceListEntry
+      tags: [PriceListEntries]
+      security: [{ sessionCookie: [] }]
+      summary: Close a price list entry by shrinking effectiveTo
+      x-noahark-permission: price_list_entry:close
+      x-noahark-csrf: true
+      description: >
+        Authorization is tenant-wide. Close is strict-shrink only and cannot
+        reopen or extend. Close remains permitted after a referenced
+        assignment or master becomes inactive because the committed close
+        service reads only the entry.
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/entryId" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [expectedVersion, effectiveTo]
+              properties:
+                expectedVersion: { $ref: "#/components/schemas/ExpectedVersion" }
+                effectiveTo:
+                  type: string
+                  format: date
+                  description: Civil date YYYY-MM-DD; no timezone.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [entry]
+                    properties:
+                      entry: { $ref: "#/components/schemas/PriceListEntry" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: STALE_VERSION
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /tenants/{tenantId}/pricing/effective-price:
+    get:
+      operationId: resolveEffectivePrice
+      tags: [EffectivePrice]
+      security: [{ sessionCookie: [] }]
+      summary: Resolve the effective unit price for a catalog item
+      x-noahark-permission: price:resolve
+      x-noahark-csrf: false
+      description: >
+        Authorization uses the validated query `legalEntityId`. `onDate` is
+        mandatory and is never defaulted to today. First and last civil dates
+        of a covering period are inclusive. Open-ended future coverage works.
+        Unresolved covering rows return HTTP 200 with `resolved` false and
+        `unitPrice` null. Missing default, inactive assignment or inactive
+        master returns a uniform NOT_FOUND. Resolution writes no audit.
+        `price:resolve` is separate from `price_list_entry:read`.
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/resolveLegalEntityId" }
+        - { $ref: "#/components/parameters/resolveCatalogItemId" }
+        - { $ref: "#/components/parameters/resolveOnDate" }
+        - { $ref: "#/components/parameters/resolvePriceListId" }
+      responses:
+        "200":
+          description: Resolved or unresolved covering result
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [price]
+                    properties:
+                      price: { $ref: "#/components/schemas/EffectivePrice" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"

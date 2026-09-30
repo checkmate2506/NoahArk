@@ -3149,7 +3149,435 @@ was not weakened: only the stale “none exist yet” description was
 replaced so it states that automatically discovered Phase-2 tenant
 routes are scanned.
 
-P2D.3b has not started. Final focused Sonnet P2D.3a cleanup audit:
+P2D.3b follows in the next subsection. Final focused Sonnet P2D.3a cleanup audit:
 **PASS**. All three original LOW findings are closed. No HIGH or MEDIUM
 finding. Independently verified full integration: **531/531** across 88
 files. P2D.3a pre-commit readiness: **YES**. P2D.3b readiness: **YES**.
+
+### P2D.3b — Pricing HTTP APIs
+
+P2D.3b only. Eleven route files, 17 operations, Pricing DTO helpers,
+safe public schema re-exports from `catalogDomain.ts`, OpenAPI fragments,
+and seven integration files. Custom Fields, UI, P2D.4 and P2D.5 were
+not started. There is no Price List archive HTTP endpoint, no
+`archivePriceList` domain service, no `price_list:archive` permission,
+and no DELETE handler.
+
+The original independent Sonnet P2D.3b audit concluded **PASS**: no
+HIGH or MEDIUM finding; three LOW findings; P2D.3b pre-commit
+readiness **YES**; P2D.4 readiness **YES**; full integration
+**547/547** across 95 files; pricing concurrency **7/7** ×5.
+
+The final focused Sonnet cleanup audit concluded **PASS**. All three
+original LOW findings are **CLOSED**. Remaining findings: **NONE**. No
+HIGH, MEDIUM or LOW finding remains. P2D.3b pre-commit readiness:
+**YES**. P2D.4 readiness: **YES**. P2D.4 was not started.
+
+#### Endpoint and permission inventory (17 operations)
+
+| Method | Path                                                     | Permission                          | Constructor        | `legalEntityIdFrom`           | operationId                  |
+| ------ | -------------------------------------------------------- | ----------------------------------- | ------------------ | ----------------------------- | ---------------------------- |
+| GET    | `/pricing/price-lists`                                   | `price_list:read`                   | `tenantReadRoute`  | null (tenant-wide)            | `listPriceLists`             |
+| POST   | `/pricing/price-lists`                                   | `price_list:create`                 | `tenantWriteRoute` | body `ownerLegalEntityId`     | `createPriceList`            |
+| GET    | `/pricing/price-lists/{priceListId}`                     | `price_list:read`                   | `tenantReadRoute`  | null (tenant-wide)            | `getPriceList`               |
+| PATCH  | `/pricing/price-lists/{priceListId}`                     | `price_list:update`                 | `tenantWriteRoute` | null (tenant-wide)            | `updatePriceList`            |
+| POST   | `/pricing/price-lists/{priceListId}/ownership-transfer`  | `price_list:transfer_ownership`     | `tenantWriteRoute` | null (tenant-wide)            | `transferPriceListOwnership` |
+| GET    | `/pricing/price-list-assignments`                        | `price_list_assignment:read`        | `tenantReadRoute`  | query `legalEntityId` or null | `listPriceListAssignments`   |
+| POST   | `/pricing/price-list-assignments`                        | `price_list_assignment:create`      | `tenantWriteRoute` | body `legalEntityId`          | `createPriceListAssignment`  |
+| GET    | `/pricing/price-list-assignments/{assignmentId}`         | `price_list_assignment:read`        | `tenantReadRoute`  | null (tenant-wide)            | `getPriceListAssignment`     |
+| PATCH  | `/pricing/price-list-assignments/{assignmentId}`         | `price_list_assignment:update`      | `tenantWriteRoute` | null (tenant-wide)            | `updatePriceListAssignment`  |
+| POST   | `/pricing/price-list-assignments/{assignmentId}/archive` | `price_list_assignment:archive`     | `tenantWriteRoute` | null (tenant-wide)            | `archivePriceListAssignment` |
+| PUT    | `/pricing/default-price-list`                            | `price_list_assignment:set_default` | `tenantWriteRoute` | body `legalEntityId`          | `setDefaultPriceList`        |
+| GET    | `/pricing/price-list-entries`                            | `price_list_entry:read`             | `tenantReadRoute`  | query `legalEntityId` or null | `listPriceListEntries`       |
+| POST   | `/pricing/price-list-entries`                            | `price_list_entry:create`           | `tenantWriteRoute` | null (tenant-wide)            | `createPriceListEntry`       |
+| GET    | `/pricing/price-list-entries/{entryId}`                  | `price_list_entry:read`             | `tenantReadRoute`  | null (tenant-wide)            | `getPriceListEntry`          |
+| PATCH  | `/pricing/price-list-entries/{entryId}`                  | `price_list_entry:update`           | `tenantWriteRoute` | null (tenant-wide)            | `updatePriceListEntry`       |
+| POST   | `/pricing/price-list-entries/{entryId}/close`            | `price_list_entry:close`            | `tenantWriteRoute` | null (tenant-wide)            | `closePriceListEntry`        |
+| GET    | `/pricing/effective-price`                               | `price:resolve`                     | `tenantReadRoute`  | query `legalEntityId`         | `resolveEffectivePrice`      |
+
+No DELETE. No Price List archive. No `tenantReadPostRoute`. No Custom-Field
+or UI paths. Routes do not import `apiHandler` (except shared `jsonOk`),
+`resolveTenantContext`, `authorize`, privileged DB clients,
+`$transaction`, Prisma/SQLSTATE mapping, or audit writers. Each route
+calls exactly one committed domain operation. Routes perform no overlap
+SELECT and do not default `onDate` to today.
+
+`ListPriceListEntriesSchema` already exposes an explicit
+`legalEntityId` filter, so filtered entry list uses that trusted query
+value for entity-scoped authorization. Entry create remains tenant-wide
+because legal entity is derived from the two assignment rows and is not
+accepted on the request.
+
+#### T-3 authorization choices
+
+- Entity-scoped authorization is used only when a trusted legal entity is
+  present on validated request input: Price List create (`ownerLegalEntityId`),
+  assignment create (`legalEntityId`), assignment list when the query
+  filter is present, set-default body `legalEntityId`, entry list when
+  the query filter is present, and effective-price query `legalEntityId`.
+- Price List get/update/transfer, unfiltered lists, all id-derived
+  assignment operations, and entry create/get/update/close are
+  tenant-wide (`legalEntityId` null). Entity-scoped-only versions of
+  those permissions return 403.
+- Routes do not pre-read a database row before authorization, do not
+  search for a permission held in any accessible entity, and do not
+  reconstruct `AccessContext` from JSON. Body `permissions`,
+  `actingUserId`, `requestId`, `tenantId` and `legalEntityIds` do not
+  grant authority. Entity A permission does not authorize entity B.
+
+#### Decimal-string and civil-date contracts
+
+`unitPrice` is a JSON string everywhere. Accepted input matches
+`^(?:0|[1-9][0-9]{0,16})(?:\.[0-9]{1,6})?$`. Routes never parse money
+with `parseFloat`, `Number`, unary `+`, or scientific notation.
+Responses use the committed canonical six-decimal format. Audit values
+remain strings. OpenAPI monetary fields are `type: string`, never
+`type: number`.
+
+Pricing dates are civil dates `YYYY-MM-DD`. OpenAPI uses `type: string`,
+`format: date`, documented as civil date with no timezone. Routes never
+call `new Date(userInput)` and never default `onDate`. Explicit `null`
+versus absent `effectiveTo` is preserved through the domain schemas.
+
+The local OpenAPI response validator does not fully enforce `pattern`,
+`format`, bounds or every OpenAPI keyword. Pricing tests add explicit
+decimal-pattern and civil-date assertions rather than overstating
+validator completeness. Non-vacuity covers numeric `unitPrice`, missing
+`null` in an applicable enum, wrong assignment status, civil date
+documented as `date-time`, and resolved/unresolved effective-price
+shape.
+
+#### Price List behavior
+
+Create is one atomic domain call returning `{ priceList, assignment }`.
+Currency is SGD, MYR or IDR and is immutable after creation. Update does
+not accept `currency` or `ownerLegalEntityId`. Transfer uses the
+committed dual-scope domain rules. Assigned non-owners may read; update
+and transfer return 403. There is no Price List archive operation.
+
+#### Assignment lifecycle and archive permanence
+
+Create requires the target legal entity in trusted scope and a Price
+List already visible through owner-or-assigned RLS. Duplicate
+`(priceListId, legalEntityId)`, including an archived pair, returns 409.
+Archived assignments cannot be revived or recreated; the pair remains
+reserved. Leaving ACTIVE clears `isDefault` in the same domain update.
+Suspend/archive of the last ACTIVE assignment returns 409. Archive is
+permanent. Routes do not alter Price List ownership. Assignment create
+takes the shared `price-list-assignments:<tenant>:<priceListId>`
+advisory key and does not take a master-row `FOR UPDATE`.
+
+#### Default-selection behavior
+
+`PUT /pricing/default-price-list` calls `setDefaultPriceList` exactly
+once with the committed strict body `{ legalEntityId, priceListId }`
+(`priceListId` may be `null`; no `expectedVersion`). Lock order remains
+entirely inside the domain: default advisory key, then sorted assignment
+advisory keys, then assignment rows, then audit. First-time set, swap
+and clear succeed. Setting the existing ACTIVE default or clearing when
+no default exists returns 422 with no write or audit. Exactly one
+`price_list_assignment.default_changed` audit per successful operation.
+Concurrent swaps leave exactly one ACTIVE default.
+
+#### Entry create/update/close and overlap
+
+Create input is the committed schema (`priceListAssignmentId`,
+`catalogItemAssignmentId`, `unitPrice` string, `effectiveFrom`,
+nullable `effectiveTo`). Legal entity is derived by the domain from the
+two assignment rows. Both assignments must refer to the same legal
+entity and both must be ACTIVE; both masters must be ACTIVE for
+create/update. Entry create takes Price List Assignment `FOR SHARE`
+before Catalog Item Assignment `FOR SHARE` and does not lock either
+master. Overlap authority is the PostgreSQL exclusion constraint and
+maps to 409 `CONFLICT` without leaking `23P01`, Prisma detail, SQL,
+constraint names or driver metadata. Adjacent and single-day periods
+are accepted; inclusive overlap is rejected. Update may change or clear
+`effectiveTo` while ACTIVE; assignment identifiers are immutable. Close
+is strict-shrink only and remains permitted after the referenced
+assignment or master becomes inactive because the committed close
+service reads only the entry.
+
+GET `/pricing/price-list-entries` is cursor-paginated
+`(effectiveFrom DESC, id DESC)` with default 25, cap 100. A dedicated
+route-level test seeds five in-scope entries (three sharing
+`effectiveFrom`, plus one earlier and one later date) plus an
+out-of-filter row on another assignment. With `limit=2` and a
+`priceListAssignmentId` filter on every continuation, traversal
+returns every in-scope row exactly once, splits a shared-`effectiveFrom`
+group across a page boundary by `id`, ends with `nextCursor` null, and
+rejects a malformed cursor with 422. The test treats the cursor as an
+opaque string and does not reimplement the codec. The final focused
+Sonnet cleanup audit independently verified that same-`effectiveFrom`
+multi-page traversal and the `(effectiveFrom DESC, id DESC)` cursor
+tie-breaker across a page boundary.
+
+#### Effective-price behavior
+
+Query requires `legalEntityId`, `catalogItemId` and `onDate`;
+`priceListId` is optional. Missing `onDate` is 422. No default and no
+explicit list, inactive Price List assignment, inactive Catalog Item
+assignment, or inactive master return uniform 404. No covering row
+returns 200 with `resolved: false` and `unitPrice: null`. A covering
+row returns 200 with `resolved: true`, canonical six-decimal
+`unitPrice`, and civil dates. First/last date bounds are inclusive;
+open-ended future works. Resolution writes no audit.
+`price:resolve` is separate from `price_list_entry:read`.
+
+#### Isolation, CSRF, rate limit and audit
+
+Owner reads/mutates. Assigned non-owner reads succeed; Price List
+update/transfer return 403. Unrelated same-tenant identifiers return 404. Cross-tenant identifiers use the same public 404 shape as missing
+ids. Forged tenant path and empty legal-entity scope return 403.
+Request body cannot widen legal-entity scope. Rejected operations leave
+rows and audits unchanged. Responses do not leak tenant id of another
+tenant, invisible versions, SQLSTATE, Prisma class, constraint or
+driver metadata.
+
+Forged-Origin CSRF covers Price List create, ownership transfer,
+assignment archive, set default, entry create and entry close. Each is
+403 with no mutation, no mutation audit, and no write-bucket
+consumption. An authorized write consumes exactly one tenant-user
+bucket and one tenant bucket. GET effective-price and other reads do
+not consume write buckets.
+
+Verified audit actions: `price_list.created`, `price_list.updated`,
+`price_list.ownership_transferred`, `price_list_assignment.created`,
+`price_list_assignment.updated`, `price_list_assignment.archived`,
+`price_list_assignment.default_changed`, `price_list_entry.created`,
+`price_list_entry.updated`, `price_list_entry.closed`. There is no
+`price_list.archived`. Actor and requestId come from authenticated
+session / trusted request context. Forged body identity fields do not
+alter audit identity. Decimal and civil-date values in audits remain
+strings. Stale/conflict/validation/authz/CSRF failures add no mutation
+audit. Chains remain gapless and valid.
+
+#### Concurrency
+
+- Two ownership transfers with the same `expectedVersion`: one 200, one
+  409 `STALE_VERSION`; owner/version change once; assignments unchanged;
+  exactly one transfer audit; chain valid.
+- Concurrent archive/suspend of the final two ACTIVE Price List
+  assignments: exactly one succeeds, exactly one 409, at least one
+  ACTIVE remains, default state remains valid, one lifecycle audit,
+  chain valid.
+- Concurrent overlapping entry creation: one 201, one 409 `CONFLICT`,
+  one entry row, one created audit, no storage/error details leaked,
+  chain valid.
+- Concurrent default swaps: exactly one ACTIVE default remains; no
+  partial clear/set; chain valid.
+- Entry create versus Price List Assignment suspension, both orderings,
+  using real PostgreSQL row-lock coordination (`FOR SHARE` plus
+  PID-correlated `pg_stat_activity`): create-first commits then
+  suspension completes; suspend-first rejects create with no entry or
+  audit.
+- Entry create versus Catalog Item Assignment suspension, both
+  orderings, same lock-wait proof. Catalog item PATCH is the existing
+  P2D.3a route, not a new path.
+- Assignment-create versus ownership transfer on the shared
+  `price-list-assignments:` advisory key. Positive create-first remains
+  HTTP assignment-create waiting on the holder, then 201. The original
+  visibility-loss sub-case mutated owner B → D with a raw SQL
+  `UPDATE price_list` on the holder; production transfer blocking was
+  proven separately on another Price List. LOW-finding cleanup replaced
+  that split evidence with one end-to-end route race: holder takes only
+  the advisory key; the real ownership-transfer HTTP handler (B → D,
+  actor scope `{B,D}`) is queued first; the real assignment-create HTTP
+  handler (C, actor scope `{B,C}`) is queued second; both waiters are
+  proven before release; after commit, transfer is 200 owner D version
+  +1, create is 404 `NOT_FOUND`, assignment set remains `{A}`, no C
+  row, no extra `price_list_assignment.created`, exactly one added
+  `price_list.ownership_transferred` for that list, valid chain. The
+  final focused Sonnet cleanup audit independently verified that
+  end-to-end route race: the holder transaction performed no ownership
+  or assignment mutation; real transfer B → D returned 200; real
+  assignment create resumed as 404 `NOT_FOUND`; assignments remained
+  `{A}`; no assignment-created audit; exactly one
+  ownership-transferred audit; audit chain valid and gapless. A
+  separate transfer-only advisory probe on a third list still shows the
+  production transfer handler blocked until the holder commits, without
+  duplicating the TOCTOU list's transfer audit.
+
+Primary file `pricingApiConcurrency.test.ts` (7 tests) ran five
+consecutive clean times after cleanup.
+
+#### OpenAPI
+
+Exactly 17 Pricing operations and 11 Pricing path entries. No Price
+List archive path. No DELETE. operationId/method/path/status agree with
+the route files. Request and response schemas are closed where
+production returns fixed projections. `unitPrice` is a string with the
+committed pattern. Civil dates use `format: date`. Assignment archive
+permanence, tenant-wide-only authorization, mandatory `onDate`,
+unresolved effective price as HTTP 200, and overlap 409 are documented.
+No discount, promotion, tax-inclusive, conversion or rounding fields.
+
+Nested response validation via `openapiResponseValidator.ts` covers
+real 2xx bodies for all 17 operations. Permanent structural assertions
+in `pricingApi.test.ts` cover: no SQLSTATE/Prisma mapping tokens in
+routes; no route transactions or privileged clients; no Pricing DELETE;
+no `tenantReadPostRoute`; no `catalog-item-assignments:` advisory token
+on Pricing routes or Pricing service; no unsupported pricing concepts;
+no `archivePriceList` / `PRICE_LIST_ARCHIVED`; no numeric monetary
+schema. `routeBoundary.test.ts` was not modified.
+
+#### Path inventory (22)
+
+1. `apps/web/app/api/v1/tenants/[tenantId]/pricing/price-lists/route.ts`
+2. `apps/web/app/api/v1/tenants/[tenantId]/pricing/price-lists/[priceListId]/route.ts`
+3. `apps/web/app/api/v1/tenants/[tenantId]/pricing/price-lists/[priceListId]/ownership-transfer/route.ts`
+4. `apps/web/app/api/v1/tenants/[tenantId]/pricing/price-list-assignments/route.ts`
+5. `apps/web/app/api/v1/tenants/[tenantId]/pricing/price-list-assignments/[assignmentId]/route.ts`
+6. `apps/web/app/api/v1/tenants/[tenantId]/pricing/price-list-assignments/[assignmentId]/archive/route.ts`
+7. `apps/web/app/api/v1/tenants/[tenantId]/pricing/default-price-list/route.ts`
+8. `apps/web/app/api/v1/tenants/[tenantId]/pricing/price-list-entries/route.ts`
+9. `apps/web/app/api/v1/tenants/[tenantId]/pricing/price-list-entries/[entryId]/route.ts`
+10. `apps/web/app/api/v1/tenants/[tenantId]/pricing/price-list-entries/[entryId]/close/route.ts`
+11. `apps/web/app/api/v1/tenants/[tenantId]/pricing/effective-price/route.ts`
+12. `apps/web/lib/api/schemas/pricingSchemas.ts`
+13. `apps/web/tests/integration/pricingApi.test.ts`
+14. `apps/web/tests/integration/pricingApiPermissions.test.ts`
+15. `apps/web/tests/integration/pricingApiIsolation.test.ts`
+16. `apps/web/tests/integration/pricingApiEntries.test.ts`
+17. `apps/web/tests/integration/pricingApiDefault.test.ts`
+18. `apps/web/tests/integration/pricingApiResolution.test.ts`
+19. `apps/web/tests/integration/pricingApiConcurrency.test.ts`
+20. `apps/web/lib/services/catalogDomain.ts`
+21. `apps/web/openapi.yaml`
+22. `docs/PHASE_02_IMPLEMENTATION.md`
+
+Automatic discovery covers all 11 pricing routes (GET →
+`tenantReadRoute`, POST/PATCH/PUT → `tenantWriteRoute`).
+
+#### Test counts
+
+- Default Prettier `--check` on the 22 authorized paths: exit 0
+- `git diff --check`: exit 0
+- `pnpm turbo run lint --force`: exit 0
+- `pnpm turbo run typecheck --force`: exit 0
+- Workspace unit tests (`pnpm turbo run test --force`): all packages
+  passed; `@noahark/web` unit **121/121** (13 files), including
+  `routeBoundary.test.ts` **10/10**
+- Pricing API integration **17/17** (7 files)
+- `pricingApiConcurrency.test.ts` five consecutive runs after cleanup:
+  **7/7** each (**35/35**)
+- Targeted combined integration independently verified **80/80** across
+  28 files
+- `pricingDomain*.test.ts` **15/15** (7 files)
+- `catalogDomain*.test.ts` **19/19** (6 files)
+- `catalogApi*.test.ts` **12/12** (6 files)
+- P2D.2a `partyApi*.test.ts` **14/14** (6 files)
+- P2D.2b assignment/role API **11/11** (6 files)
+- `apiRateLimit.test.ts` **12/12**
+- P2A six-file subset **61/61** (6 files)
+- Full `@noahark/web` integration **548/548** (95 files) on PostgreSQL
+  **18.4** after LOW-finding cleanup (original independent audit was
+  **547/547**; the added entry-pagination test is the extra count).
+  Live `SELECT version()` matched `^PostgreSQL 18.4\b` against a
+  disposable `noahark_test_integration_*` database
+- `pnpm --filter @noahark/web build` — Next.js **16.3.4**; restored
+  generated `apps/web/next-env.d.ts` to HEAD
+- OpenAPI validate exit 0; conformance **5/5**
+
+PostgreSQL **16.14**: UNVERIFIED (no schema, migration or RLS change in
+this slice). Disposable `noahark_test_*` databases were dropped after
+every integration run. Persistent `noahark` was not reset, seeded,
+migrated or mutated.
+
+#### Initial failures and corrections
+
+1. Structural scan matched `archivePriceList` as a substring of
+   `archivePriceListAssignment` / `setDefaultPriceList`. Route scan now
+   uses a word boundary; OpenAPI wording was changed so the YAML no
+   longer contains the `archivePriceList` token (only
+   `archivePriceListAssignment` remains).
+2. Entry PATCH clearing `effectiveTo` on 1–31 July overlapped an
+   adjacent 1 August single-day row (409). The update now changes
+   `unitPrice` only; a separate PATCH clears `effectiveTo` on the
+   adjacent row.
+3. Isolation assignment GET returned 403 instead of 404 because the
+   unrelated actor lacked `price_list_assignment:read`. The actor was
+   granted read+update; invisible ids then 404.
+4. Effective-price write-bucket snapshot was taken before an extra
+   setup POST. The snapshot now runs after that setup write.
+5. Resolution last-ACTIVE Catalog Item assignment suspend returned 409
+   because the item had only one ACTIVE assignment. Tests now assign
+   the item to a second legal entity first.
+6. Permission-matrix assignment create 409 because the extra list was
+   already assigned; a dedicated list is created. Set-default was
+   pre-seeded so first-time PUT could not prove 200; the pre-seed was
+   removed. Unused `setDefaultPriceList` import removed.
+7. Already-default PUT with extra `expectedVersion` returned 422 via
+   `.strict()` rather than the domain no-op. The body was reduced to
+   the two committed fields.
+8. Permission-matrix close returned 422 because `effectiveTo` extended
+   the period. Close now shrinks to a date inside the open interval.
+9. Concurrency Catalog Item assignment suspend of `item2` hit the
+   last-ACTIVE guard (409). A second assignment is created first.
+10. Concurrent assignment-create versus ownership-transfer via
+    `Promise.all` was racy (create often 201). The implementation-slice
+    visibility-loss proof then used a holder `UPDATE price_list` while
+    HTTP create waited, plus a separate transfer-route advisory probe.
+    Independent Sonnet P2D.3b audit recorded that split as LOW-1/LOW-2.
+    Cleanup replaced the raw-SQL mutation with a FIFO transfer-first
+    HTTP race (see concurrency section).
+11. Typecheck: `OpenApiSchema` has no `format`. Pricing OpenAPI
+    non-vacuity assertions now cast rather than modifying
+    `openapiResponseValidator.ts` (outside the 22-path cap).
+12. Default Prettier `--write` reformatted `pricingApiEntries.test.ts`
+    (and earlier OpenAPI / test files) before `--check` passed.
+
+#### LOW-finding cleanup (tests and documentation only)
+
+Original independent Sonnet P2D.3b audit: **PASS**. No HIGH or MEDIUM
+finding. Three LOW findings:
+
+1. Assignment-create versus ownership-transfer negative ordering used a
+   raw SQL owner update instead of the real transfer HTTP handler.
+2. Documentation risked conflating that raw-SQL proof with the separate
+   production-transfer blocking probe.
+3. No actual multi-page continuation test existed for Price List
+   Entries, especially rows sharing the same `effectiveFrom` cursor
+   component.
+
+Cleanup (this pass) changed only `pricingApiConcurrency.test.ts`,
+`pricingApiEntries.test.ts`, and this subsection. No production route,
+schema, OpenAPI, or domain change.
+
+The final focused Sonnet cleanup audit concluded **PASS**. All three
+original LOW findings are **CLOSED**. Remaining findings: **NONE**. No
+HIGH, MEDIUM or LOW finding remains. It independently verified the real
+transfer-route versus real assignment-create route race (holder
+performed no ownership or assignment mutation; transfer B → D 200;
+create 404 `NOT_FOUND`; assignments `{A}`; no assignment-created audit;
+exactly one ownership-transferred audit; valid gapless chain) and
+same-`effectiveFrom` multi-page entry traversal with the
+`(effectiveFrom DESC, id DESC)` tie-breaker across a page boundary.
+Pricing API **17/17**. Concurrency **7/7** ×5 (**35/35**). Targeted
+combined suite **80/80** across 28 files. Full web integration
+**548/548** across 95 files. PostgreSQL **18.4** verified. PostgreSQL
+**16.14** remains UNVERIFIED. P2D.3b pre-commit readiness: **YES**.
+P2D.4 readiness: **YES**. P2D.4 was not started.
+
+#### Dependency audit (point-in-time)
+
+- `pnpm audit --prod`: 8 advisories (1 moderate, 7 high) through Prisma
+  7.9.1 `mysql2` / `deepmerge-ts` / `fast-uri`. Unchanged hold; no
+  `pnpm audit --fix`.
+- `pnpm audit`: 9 advisories (1 moderate, 8 high), same Prisma paths
+  plus `js-yaml` via swagger-parser. Unchanged hold.
+
+#### Protected surfaces
+
+No change to `packages/catalog` production services, `packages/audit`,
+`packages/authz`, limiter or tenant-route foundation,
+`packages/db/prisma/**`, schema/migrations/RLS/grants, permission
+catalogue, manifests, `pnpm-lock.yaml`, UI, ADR history, Catalog
+routes, Custom-Field routes, or P2D.4 / P2D.5 work. `catalogDomain.ts`
+only re-exports already-committed public schemas. `routeBoundary.test.ts`
+was not modified.
+
+P2D.4 has not started. Original independent Sonnet P2D.3b audit:
+**PASS**. Final focused Sonnet cleanup audit: **PASS**. All three
+original LOW findings are **CLOSED**. No remaining HIGH, MEDIUM or LOW
+finding. P2D.3b pre-commit readiness: **YES**. P2D.4 readiness:
+**YES**.
