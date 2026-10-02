@@ -3581,3 +3581,251 @@ P2D.4 has not started. Original independent Sonnet P2D.3b audit:
 original LOW findings are **CLOSED**. No remaining HIGH, MEDIUM or LOW
 finding. P2D.3b pre-commit readiness: **YES**. P2D.4 readiness:
 **YES**.
+
+### P2D.4 — Custom-field HTTP APIs
+
+P2D.4 only. Independent Sonnet P2D.4 audit: **PASS**. Focused Sonnet
+documentation cleanup audit: **PASS**. Remaining findings: **NONE**. No
+HIGH, MEDIUM, LOW or INFORMATIONAL finding remains. The previous
+dependency-audit documentation LOW is **CLOSED**. P2D.5 and UI were not
+started. No ADR was added or rewritten.
+
+The independent audit verified all nine HTTP operations; T-3
+tenant-wide-only authorization remains fail-closed; D-10 owner boundary
+across Party, Catalog Item and Price List; all nine entity types and all
+six data types; the HTTP concurrency proof; OpenAPI and production route
+conformance; and unchanged protected surfaces.
+
+Focused documentation-cleanup audit checks: 15-path inventory confirmed;
+Prettier passed; `git diff --check` passed; fresh `pnpm audit` counts
+matched the documented point-in-time counts; HEAD and `origin/main`
+remained unchanged; staging remained empty; `apps/web/next-env.d.ts`
+remained clean.
+
+P2D.4 changeset correctness: **PASS**. P2D.4 pre-commit readiness:
+**YES**. Separate Next.js security-patch readiness: **YES**. P2D.5
+readiness: **NO** until the separate Next.js patch is audited, committed
+and pushed. P2D.5 has not started.
+
+Authorised footprint (**15 paths**; sixteenth reserved slot unused):
+
+New routes (6):
+
+- `apps/web/app/api/v1/tenants/[tenantId]/custom-fields/definitions/route.ts`
+- `apps/web/app/api/v1/tenants/[tenantId]/custom-fields/definitions/[definitionId]/route.ts`
+- `apps/web/app/api/v1/tenants/[tenantId]/custom-fields/definitions/[definitionId]/deactivate/route.ts`
+- `apps/web/app/api/v1/tenants/[tenantId]/custom-fields/definitions/[definitionId]/activate/route.ts`
+- `apps/web/app/api/v1/tenants/[tenantId]/custom-fields/values/route.ts`
+- `apps/web/app/api/v1/tenants/[tenantId]/custom-fields/values/[valueId]/route.ts`
+
+New integration tests (6):
+
+- `apps/web/tests/integration/customFieldApi.test.ts`
+- `apps/web/tests/integration/customFieldApiPermissions.test.ts`
+- `apps/web/tests/integration/customFieldApiOwnerBoundary.test.ts`
+- `apps/web/tests/integration/customFieldApiTargets.test.ts`
+- `apps/web/tests/integration/customFieldApiTypes.test.ts`
+- `apps/web/tests/integration/customFieldApiAudit.test.ts`
+
+Modified (3):
+
+- `apps/web/lib/services/customFieldDomain.ts`
+- `apps/web/openapi.yaml`
+- `docs/PHASE_02_IMPLEMENTATION.md`
+
+Reused committed `customFieldDomainFixture.ts` and
+`openapiResponseValidator.ts`. No sixteenth path.
+
+#### Nine operations
+
+| Method | Path                                                   | Permission                           | Domain                            |
+| ------ | ------------------------------------------------------ | ------------------------------------ | --------------------------------- |
+| GET    | `/custom-fields/definitions`                           | `custom_field_definition:read`       | `listCustomFieldDefinitions`      |
+| POST   | `/custom-fields/definitions`                           | `custom_field_definition:create`     | `createCustomFieldDefinition`     |
+| GET    | `/custom-fields/definitions/{definitionId}`            | `custom_field_definition:read`       | `getCustomFieldDefinition`        |
+| PATCH  | `/custom-fields/definitions/{definitionId}`            | `custom_field_definition:update`     | `updateCustomFieldDefinition`     |
+| POST   | `/custom-fields/definitions/{definitionId}/deactivate` | `custom_field_definition:set_status` | `deactivateCustomFieldDefinition` |
+| POST   | `/custom-fields/definitions/{definitionId}/activate`   | `custom_field_definition:set_status` | `activateCustomFieldDefinition`   |
+| GET    | `/custom-fields/values`                                | `custom_field_value:read`            | `listCustomFieldValues`           |
+| GET    | `/custom-fields/values/{valueId}`                      | `custom_field_value:read`            | `getCustomFieldValue`             |
+| PUT    | `/custom-fields/values`                                | `custom_field_value:write`           | `setCustomFieldValue`             |
+
+No DELETE, clear, unset, archive, `value: null`, or extra custom-field
+endpoint.
+
+#### Route constructors and T-3
+
+GET uses `tenantReadRoute`. POST/PATCH/PUT use `tenantWriteRoute`.
+`legalEntityIdFrom` is omitted, so authorize uses `legalEntityId: null`
+(tenant-wide) for all nine operations, including values. The target
+owner/legal entity is derived inside the domain service. An
+entity-scoped-only grant is 403. Routes call exactly one domain
+operation and do not import Prisma, privileged clients, audit writers,
+or `apiHandler` / `resolveTenantContext` / `authorize` directly.
+
+`customFieldDomain.ts` re-exports the nine service functions from
+`@noahark/custom-fields`, re-exports committed schemas/constants via
+`@noahark/custom-fields/src/schemas`, and shapes public DTOs (omit
+`tenantId`; ISO timestamps; DECIMAL as a string; DATE as civil
+`YYYY-MM-DD`).
+
+#### D-1 through D-10 at the API
+
+Definitions persist and return `legalEntityId: null`. Identity keys are
+immutable after create. SINGLE_SELECT options remain add-only. Duplicate
+`(tenantId, entityType, key)` is 409 CONFLICT with no extra audit.
+Stale `expectedVersion` is 409 STALE_VERSION. Already-active/inactive
+status no-ops return VALIDATION_FAILED. Inactive definitions reject
+later PUT with 409 CONFLICT; existing values remain readable.
+
+PUT values is an idempotent upsert on `(definitionId, entityId)` with no
+`expectedVersion`. Legal entity is never request-supplied. Nine entity
+types and six data types match `PHASE2_ENTITY_TYPES` /
+`SUPPORTED_DATA_TYPES` (OpenAPI enum equality is asserted). D-10: owner
+can write shared-master values; assigned non-owners cannot write or
+read them. After ownership transfer the HTTP GET preserves the domain
+result (including NOT_FOUND) rather than remapping it.
+
+List order for definitions and values is `(createdAt ASC, id ASC)`.
+`displayOrder` is returned and is not a cursor key; changing it does
+not redefine traversal.
+
+#### Concurrency and audit
+
+HTTP proofs in `customFieldApi.test.ts`: concurrent first PUTs leave
+one row and do not leak 23505/P2002; concurrent overwrites leave one
+canonical value; set-then-deactivate completes; deactivate-first (held
+`custom-field-value:{tenant}:{definitionId}:{entityId}` advisory, then
+HTTP deactivate, then resume PUT) fails 409 CONFLICT; an external
+advisory holder blocks the real PUT while value and audit counts stay
+unchanged (`pg_locks` waiters and `pg_stat_activity` observed before
+release). Audit actions:
+`custom_field_definition.created/updated/deactivated/activated`,
+`custom_field_value.created/updated`. Actor is the session user;
+request id is trusted `x-request-id`. Payloads omit the typed value
+and secret strings.
+
+#### Test counts
+
+| Suite                                           | Result                                                                            |
+| ----------------------------------------------- | --------------------------------------------------------------------------------- |
+| `@noahark/web` unit                             | **121/121**                                                                       |
+| `routeBoundary.test.ts`                         | **10/10**                                                                         |
+| `@noahark/custom-fields` unit                   | **35/35**                                                                         |
+| `customFieldApi*.test.ts`                       | **8/8** (6 files)                                                                 |
+| Concurrency-bearing `customFieldApi.test.ts` ×5 | **3/3** each (**15/15**)                                                          |
+| `customFieldDomain*.test.ts`                    | **31/31**                                                                         |
+| `pricingApi*.test.ts`                           | **17/17**                                                                         |
+| `catalogApi*.test.ts`                           | **12/12**                                                                         |
+| `partyApi*.test.ts`                             | **14/14**                                                                         |
+| P2D.2b assignment/role API                      | **11/11**                                                                         |
+| `apiRateLimit.test.ts`                          | **12/12**                                                                         |
+| Canonical P2A six-file subset                   | **61/61**                                                                         |
+| Combined named regression (40 files)            | **158/158**                                                                       |
+| Full `@noahark/web` integration                 | **556/556** across **101** files (prior 548/548 across 95 plus 8 tests / 6 files) |
+| OpenAPI conformance                             | **5/5**                                                                           |
+
+Independently reproduced by the Sonnet P2D.4 audit:
+`@noahark/custom-fields` **35/35**; web unit **121/121**;
+`routeBoundary.test.ts` **10/10**; `customFieldApi*.test.ts` **8/8**
+across 6 files; `customFieldApi.test.ts` concurrency **3/3 ×5**,
+**15/15**; `customFieldDomain*.test.ts` **31/31**; full web integration
+**556/556** across **101 files**. OpenAPI validation passed. Production
+build passed. `apps/web/next-env.d.ts` was restored to HEAD.
+
+PostgreSQL **18.4** verified live (`SELECT version()`). PostgreSQL
+**16.14**: UNVERIFIED (no schema, migration or RLS change). Disposable
+`noahark_test_*` databases were dropped after every integration run; none
+remained. Persistent `noahark` was not reset, seeded, migrated or
+mutated.
+
+Playwright skipped: this slice adds no UI or `.tsx` runtime surface.
+
+#### Dependency audit (point-in-time)
+
+The original P2D.4 implementer record listed `pnpm audit --prod` as
+**9** advisories (2 moderate, 7 high) and omitted the critical Next.js
+advisory. That was the independent audit's sole LOW finding.
+
+Independent Sonnet P2D.4 audit observation:
+
+- `pnpm audit --prod`: **10** advisories (1 critical, 7 high,
+  2 moderate)
+- `pnpm audit`: **15** advisories (1 critical, 10 high, 4 moderate)
+
+Fresh registry query during this documentation cleanup (2026-10-02):
+
+- `pnpm audit --prod`: **10** advisories (1 critical, 7 high,
+  2 moderate)
+- `pnpm audit`: **15** advisories (1 critical, 10 high, 4 moderate)
+
+Advisory-registry results are point-in-time. These cleanup counts match
+the independent observation.
+
+Direct production Next.js remains **16.3.4**, which is in the affected
+range for `GHSA-vcvr-r3jv-pc5j` (`>=16.2.0 <16.3.6`). The patched
+release is **16.3.6**. The advisory concerns Node.js `next/og`
+`ImageResponse`. The independent audit found no `next/og`,
+`ImageResponse`, `@vercel/og`, Open Graph image route or equivalent
+usage. The production build manifest contained no image-generation
+route. Current application reachability was therefore assessed as
+**absent from repository evidence**.
+
+The advisory was **not introduced by P2D.4**: manifests and
+`pnpm-lock.yaml` are unchanged in this changeset. That does **not**
+justify leaving a critical direct dependency unpatched. A separate
+priority Next.js security patch is required before P2D.5 or
+deployment. That patch must **not** be mixed into the P2D.4 changeset.
+
+Distinguish:
+
+1. **P2D.4 changeset correctness:** PASS.
+2. **Current advisory reachability:** no reachable `next/og` route
+   found.
+3. **Repository dependency posture:** a critical direct dependency
+   advisory remains and requires a separate patch. It is not harmless,
+   not resolved, and not accepted indefinitely.
+4. **P2D.5 implementation:** not started and should wait until the
+   separate Next.js patch is completed.
+
+Prisma CLI-path advisories (`deepmerge-ts`, `mysql2`, `fast-uri`) and
+dev-path `js-yaml` / `brace-expansion` remain an unchanged hold. No
+`pnpm audit --fix`. No dependency change in this cleanup.
+
+#### Initial failures and corrections
+
+1. Strict create/update/PUT bodies reject unknown keys, so forged
+   `permissions` / `actingUserId` / `requestId` on an authorised write
+   are 422, not 201. Happy-path and exact-permission bodies were
+   reduced to the committed fields; a dedicated forged-authority case
+   still proves extra keys do not grant 403 bypass.
+2. Web lint: unused `createTestLegalEntity` import in the permissions
+   file. Restored when the cross-tenant GET needed an extra tenant with
+   a granted legal entity (empty LE scope is 403, not 404).
+3. Typecheck: value DTO `legalEntityId` widened to `string \| null` to
+   match the domain row; audit helper accepts `ReadonlySet`; permission
+   `invokeLoose` params require `tenantId`.
+4. Lifecycle test re-read the stale PATCH response body. The first
+   `readJson` result is reused.
+5. OpenAPI descriptions initially named `demo_approval_subject`,
+   `NUMBER` and `MULTI_SELECT`. Wording was changed so those tokens do
+   not appear as supported enums; structural scans still forbid them on
+   routes.
+
+#### Protected surfaces
+
+No change to `packages/custom-fields/**` production or committed tests,
+`packages/db/prisma/**`, migrations 00001–00005, RLS/grants/triggers,
+`packages/authz/**`, `tenantRoute.ts`, limiter production code, Party /
+Catalog / Pricing routes/services/tests, manifests, `pnpm-lock.yaml`,
+UI, middleware, ADR history, P2D.5, or `apps/web/next-env.d.ts`
+(restored to HEAD after `next build` rewrote it).
+`routeBoundary.test.ts` was not modified.
+
+P2D.5 has not started. Independent Sonnet P2D.4 audit: **PASS**. Focused
+Sonnet documentation cleanup audit: **PASS**. Remaining findings:
+**NONE**. The previous dependency-audit documentation LOW is **CLOSED**.
+P2D.4 changeset correctness: **PASS**. P2D.4 pre-commit readiness:
+**YES**. Separate Next.js security-patch readiness: **YES**. P2D.5
+readiness: **NO** until the separate Next.js patch is audited, committed
+and pushed.

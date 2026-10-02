@@ -6,11 +6,11 @@ info:
     Phase 1 foundation surface plus P2D.2a Party, PartyContact and
     PartyAddress APIs, P2D.2b Party assignment, CustomerRole and
     VendorRole APIs, P2D.3a Catalog Category, UnitOfMeasure,
-    CatalogItem and CatalogItem-assignment APIs, and P2D.3b Price List,
+    CatalogItem and CatalogItem-assignment APIs, P2D.3b Price List,
     Price List assignment, default selection, Price List entry and
-    effective-price APIs. Custom-field, accounting, payroll, tax,
-    invoicing and project endpoints are not part of this slice — see
-    docs/IMPLEMENTATION_ROADMAP.md.
+    effective-price APIs, and P2D.4 custom-field definition and value
+    APIs. Accounting, payroll, tax, invoicing and project endpoints
+    are not part of this slice — see docs/IMPLEMENTATION_ROADMAP.md.
 
 
     **Authentication**: an opaque, HttpOnly, database-backed session cookie
@@ -719,6 +719,156 @@ components:
           type: [string, "null"]
           format: date
           description: Civil date YYYY-MM-DD; no timezone.
+    CustomFieldEntityType:
+      type: string
+      enum:
+        - party
+        - party_contact
+        - party_legal_entity_assignment
+        - customer_role
+        - vendor_role
+        - catalog_item
+        - catalog_item_legal_entity_assignment
+        - price_list
+        - price_list_legal_entity_assignment
+      description: >
+        Exactly the nine Phase-2 custom-field target types. The Phase-1 demo
+        subject type is not supported.
+    CustomFieldDataType:
+      type: string
+      enum: [STRING, INTEGER, DECIMAL, BOOLEAN, DATE, SINGLE_SELECT]
+      description: >
+        Exactly the six supported typed-value kinds. Untagged numeric JSON and
+        multi-option arrays are not supported.
+    CustomFieldTypedValue:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [dataType, value]
+          properties:
+            dataType: { type: string, enum: [STRING] }
+            value: { type: string }
+        - type: object
+          additionalProperties: false
+          required: [dataType, value]
+          properties:
+            dataType: { type: string, enum: [INTEGER] }
+            value: { type: integer }
+        - type: object
+          additionalProperties: false
+          required: [dataType, value]
+          properties:
+            dataType: { type: string, enum: [DECIMAL] }
+            value:
+              type: string
+              description: Canonical NUMERIC(23,6) decimal string. Never a JSON number.
+        - type: object
+          additionalProperties: false
+          required: [dataType, value]
+          properties:
+            dataType: { type: string, enum: [BOOLEAN] }
+            value: { type: boolean }
+        - type: object
+          additionalProperties: false
+          required: [dataType, value]
+          properties:
+            dataType: { type: string, enum: [DATE] }
+            value:
+              type: string
+              format: date
+              description: Civil date YYYY-MM-DD; no timezone.
+        - type: object
+          additionalProperties: false
+          required: [dataType, value]
+          properties:
+            dataType: { type: string, enum: [SINGLE_SELECT] }
+            value: { type: string }
+    CustomFieldDefinition:
+      type: object
+      additionalProperties: false
+      description: >
+        Tenant-wide custom-field definition. `legalEntityId` is always JSON null.
+        Authorization for every definition operation is tenant-wide
+        (`legalEntityId` null at authorize). Identity fields `entityType`, `key`
+        and `dataType` are immutable after create. SINGLE_SELECT options are
+        add-only. Definitions are never hard-deleted; deactivate/activate change
+        `isActive`. List order is `(createdAt ASC, id ASC)`. `displayOrder` is
+        returned but is not a pagination key.
+      required:
+        [
+          id,
+          legalEntityId,
+          entityType,
+          key,
+          label,
+          dataType,
+          isRequired,
+          options,
+          isActive,
+          displayOrder,
+          version,
+          createdAt,
+          updatedAt,
+        ]
+      properties:
+        id: { type: string }
+        legalEntityId:
+          type: [string, "null"]
+          enum: [null]
+          description: Always JSON null. Definitions are tenant-wide, never entity-owned.
+        entityType: { $ref: "#/components/schemas/CustomFieldEntityType" }
+        key: { type: string }
+        label: { type: string }
+        dataType: { $ref: "#/components/schemas/CustomFieldDataType" }
+        isRequired: { type: boolean }
+        options:
+          type: [array, "null"]
+          items: { type: string }
+          description: Canonical option list for SINGLE_SELECT; JSON null otherwise.
+        isActive: { type: boolean }
+        displayOrder:
+          type: integer
+          description: Display hint only. Not used as a list cursor key.
+        version: { type: integer, minimum: 1 }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    CustomFieldValue:
+      type: object
+      additionalProperties: false
+      description: >
+        Typed custom-field value. Legal-entity authority is derived from the
+        target inside the domain service; the HTTP route never accepts or
+        calculates `legalEntityId`. PUT is an idempotent upsert keyed by
+        `(definitionId, entityId)` with no `expectedVersion`. There is no
+        DELETE, clear, unset or `value: null`. DECIMAL is a string. DATE is a
+        civil `YYYY-MM-DD` string. D-10: an assigned non-owner of a shared
+        master (`party`, `catalog_item`, `price_list`) cannot write or read the
+        owner's value. After an ownership transfer a previously hidden value
+        may surface as NOT_FOUND; the domain result is preserved.
+      required:
+        [
+          id,
+          legalEntityId,
+          definitionId,
+          entityType,
+          entityId,
+          version,
+          createdAt,
+          updatedAt,
+          typedValue,
+        ]
+      properties:
+        id: { type: string }
+        legalEntityId:
+          type: string
+          description: Derived from the target owner or scoped row. Never request-supplied.
+        definitionId: { type: string }
+        entityType: { $ref: "#/components/schemas/CustomFieldEntityType" }
+        entityId: { type: string }
+        version: { type: integer, minimum: 1 }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        typedValue: { $ref: "#/components/schemas/CustomFieldTypedValue" }
     PartyContact:
       type: object
       additionalProperties: false
@@ -925,6 +1075,39 @@ components:
       name: catalogItemId
       in: path
       required: true
+      schema: { type: string }
+    definitionId:
+      name: definitionId
+      in: path
+      required: true
+      schema: { type: string }
+    valueId:
+      name: valueId
+      in: path
+      required: true
+      schema: { type: string }
+    customFieldListEntityType:
+      name: entityType
+      in: query
+      required: false
+      schema: { $ref: "#/components/schemas/CustomFieldEntityType" }
+    customFieldListIsActive:
+      name: isActive
+      in: query
+      required: false
+      schema: { type: boolean }
+      description: >
+        Definition list filter. Must be the strings `true` or `false` when
+        present. Default is true (active definitions only).
+    customFieldValueDefinitionId:
+      name: definitionId
+      in: query
+      required: false
+      schema: { type: string }
+    customFieldValueEntityId:
+      name: entityId
+      in: query
+      required: false
       schema: { type: string }
     catalogPageLimit:
       name: limit
@@ -6170,3 +6353,462 @@ paths:
           $ref: "#/components/responses/NotFound"
         "422":
           $ref: "#/components/responses/ValidationFailed"
+
+  /tenants/{tenantId}/custom-fields/definitions:
+    get:
+      operationId: listCustomFieldDefinitions
+      tags: [CustomFieldDefinitions]
+      security: [{ sessionCookie: [] }]
+      summary: List custom-field definitions
+      x-noahark-permission: custom_field_definition:read
+      x-noahark-csrf: false
+      description: >
+        Tenant-wide list (`legalEntityId` null at authorize). Cursor order is
+        `(createdAt ASC, id ASC)`. `displayOrder` is returned on each row but
+        is not a pagination key; changing it does not redefine traversal.
+        Default `isActive` is true. Default page size 25, maximum 100.
+        Malformed, repeated or unknown query parameters return
+        VALIDATION_FAILED. The cursor is opaque.
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/cursor" }
+        - { $ref: "#/components/parameters/catalogPageLimit" }
+        - { $ref: "#/components/parameters/customFieldListEntityType" }
+        - { $ref: "#/components/parameters/customFieldListIsActive" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [definitions, nextCursor]
+                    properties:
+                      definitions:
+                        type: array
+                        items: { $ref: "#/components/schemas/CustomFieldDefinition" }
+                      nextCursor: { type: [string, "null"] }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+    post:
+      operationId: createCustomFieldDefinition
+      tags: [CustomFieldDefinitions]
+      security: [{ sessionCookie: [] }]
+      summary: Create a custom-field definition
+      x-noahark-permission: custom_field_definition:create
+      x-noahark-csrf: true
+      description: >
+        Tenant-wide create. The persisted and returned `legalEntityId` is
+        always JSON null. Unknown keys, `legalEntityId`, `tenantId`,
+        unsupported entity types and unsupported data types are rejected.
+        Duplicate `(tenantId, entityType, key)` returns 409 CONFLICT without
+        an extra audit event. SINGLE_SELECT requires `options`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [entityType, key, label, dataType]
+              properties:
+                entityType: { $ref: "#/components/schemas/CustomFieldEntityType" }
+                key: { type: string, minLength: 1, maxLength: 64 }
+                label: { type: string, minLength: 1, maxLength: 200 }
+                dataType: { $ref: "#/components/schemas/CustomFieldDataType" }
+                isRequired: { type: boolean }
+                displayOrder: { type: integer }
+                options:
+                  type: array
+                  items: { type: string }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [definition]
+                    properties:
+                      definition: { $ref: "#/components/schemas/CustomFieldDefinition" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /tenants/{tenantId}/custom-fields/definitions/{definitionId}:
+    get:
+      operationId: getCustomFieldDefinition
+      tags: [CustomFieldDefinitions]
+      security: [{ sessionCookie: [] }]
+      summary: Get a custom-field definition
+      x-noahark-permission: custom_field_definition:read
+      x-noahark-csrf: false
+      description: >
+        Tenant-wide get. Missing, cross-tenant and out-of-scope ids return a
+        uniform NOT_FOUND.
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/definitionId" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [definition]
+                    properties:
+                      definition: { $ref: "#/components/schemas/CustomFieldDefinition" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      operationId: updateCustomFieldDefinition
+      tags: [CustomFieldDefinitions]
+      security: [{ sessionCookie: [] }]
+      summary: Update a custom-field definition
+      x-noahark-permission: custom_field_definition:update
+      x-noahark-csrf: true
+      description: >
+        Tenant-wide update. `expectedVersion` is required. `entityType`, `key`,
+        `dataType`, `legalEntityId` and `tenantId` are not permitted. SINGLE_SELECT
+        options remain add-only.
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/definitionId" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [expectedVersion]
+              properties:
+                expectedVersion: { $ref: "#/components/schemas/ExpectedVersion" }
+                label: { type: string, minLength: 1, maxLength: 200 }
+                isRequired: { type: boolean }
+                displayOrder: { type: integer }
+                options:
+                  type: array
+                  items: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [definition]
+                    properties:
+                      definition: { $ref: "#/components/schemas/CustomFieldDefinition" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: STALE_VERSION
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /tenants/{tenantId}/custom-fields/definitions/{definitionId}/deactivate:
+    post:
+      operationId: deactivateCustomFieldDefinition
+      tags: [CustomFieldDefinitions]
+      security: [{ sessionCookie: [] }]
+      summary: Deactivate a custom-field definition
+      x-noahark-permission: custom_field_definition:set_status
+      x-noahark-csrf: true
+      description: >
+        Tenant-wide status change. Body is a strict `{ expectedVersion }`
+        object. Already-inactive rows return VALIDATION_FAILED. Inactive
+        definitions reject later value setting with 409 CONFLICT. Existing
+        values remain readable.
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/definitionId" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [expectedVersion]
+              properties:
+                expectedVersion: { $ref: "#/components/schemas/ExpectedVersion" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [definition]
+                    properties:
+                      definition: { $ref: "#/components/schemas/CustomFieldDefinition" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: STALE_VERSION
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /tenants/{tenantId}/custom-fields/definitions/{definitionId}/activate:
+    post:
+      operationId: activateCustomFieldDefinition
+      tags: [CustomFieldDefinitions]
+      security: [{ sessionCookie: [] }]
+      summary: Activate a custom-field definition
+      x-noahark-permission: custom_field_definition:set_status
+      x-noahark-csrf: true
+      description: >
+        Tenant-wide status change. Body is a strict `{ expectedVersion }`
+        object. Already-active rows return VALIDATION_FAILED.
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/definitionId" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [expectedVersion]
+              properties:
+                expectedVersion: { $ref: "#/components/schemas/ExpectedVersion" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [definition]
+                    properties:
+                      definition: { $ref: "#/components/schemas/CustomFieldDefinition" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: STALE_VERSION
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /tenants/{tenantId}/custom-fields/values:
+    get:
+      operationId: listCustomFieldValues
+      tags: [CustomFieldValues]
+      security: [{ sessionCookie: [] }]
+      summary: List custom-field values visible to the caller
+      x-noahark-permission: custom_field_value:read
+      x-noahark-csrf: false
+      description: >
+        Tenant-wide authorization (`legalEntityId` null). Visibility of each
+        value is RLS and D-10: assigned non-owners do not see owner values on
+        shared masters. Cursor order is `(createdAt ASC, id ASC)`. Default page
+        size 25, maximum 100. Filters `definitionId`, `entityType` and
+        `entityId` are optional. Legal entity is never a query parameter.
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/cursor" }
+        - { $ref: "#/components/parameters/catalogPageLimit" }
+        - { $ref: "#/components/parameters/customFieldValueDefinitionId" }
+        - { $ref: "#/components/parameters/customFieldListEntityType" }
+        - { $ref: "#/components/parameters/customFieldValueEntityId" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [values, nextCursor]
+                    properties:
+                      values:
+                        type: array
+                        items: { $ref: "#/components/schemas/CustomFieldValue" }
+                      nextCursor: { type: [string, "null"] }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+    put:
+      operationId: setCustomFieldValue
+      tags: [CustomFieldValues]
+      security: [{ sessionCookie: [] }]
+      summary: Create or overwrite a custom-field value
+      x-noahark-permission: custom_field_value:write
+      x-noahark-csrf: true
+      description: >
+        Idempotent upsert keyed by `(definitionId, entityId)`. There is no
+        `expectedVersion`. Authorization is tenant-wide; the value's legal
+        entity is derived from the target and is never accepted from the body.
+        `legalEntityId`, `tenantId`, `entityType`, `expectedVersion`,
+        `value: null`, unknown fields, mismatched tagged envelopes, and
+        unsupported numeric or multi-option payloads are rejected. Inactive
+        definitions and ARCHIVED targets
+        return 409 CONFLICT. Invisible targets return uniform NOT_FOUND.
+        D-10: an assigned non-owner cannot write the owner's shared-master
+        value.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [definitionId, entityId, value]
+              properties:
+                definitionId: { type: string }
+                entityId: { type: string }
+                value: { $ref: "#/components/schemas/CustomFieldTypedValue" }
+      responses:
+        "200":
+          description: Upserted value
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [value]
+                    properties:
+                      value: { $ref: "#/components/schemas/CustomFieldValue" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /tenants/{tenantId}/custom-fields/values/{valueId}:
+    get:
+      operationId: getCustomFieldValue
+      tags: [CustomFieldValues]
+      security: [{ sessionCookie: [] }]
+      summary: Get a custom-field value
+      x-noahark-permission: custom_field_value:read
+      x-noahark-csrf: false
+      description: >
+        Tenant-wide authorization. D-10 assigned non-owners receive NOT_FOUND
+        for the owner's shared-master value. Cross-tenant and out-of-scope ids
+        use the same public missing-id error shape.
+      parameters:
+        - { $ref: "#/components/parameters/tenantId" }
+        - { $ref: "#/components/parameters/valueId" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [value]
+                    properties:
+                      value: { $ref: "#/components/schemas/CustomFieldValue" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
